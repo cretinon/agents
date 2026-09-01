@@ -1,0 +1,104 @@
+{
+  "defaultModel": "deepseek/deepseek-v4-flash",
+  "rules": [
+    {
+      "path": "~/git/agents/rules/shell.md"
+    }
+    ,
+    {
+      "path": "~/git/agents/rules/bats.md"
+    }
+  ],
+  "skills": [
+    {
+      "path": "~/git/agents/skills/bats"
+    }
+  ],
+  "providers": {
+    "google": {
+      "key": "${env:GOOGLE_API_KEY}"
+    },
+    "deepseek": {
+      "api": "openai-chat",
+      "url": "https://api.deepseek.com",
+      "key": "${env:DEEPSEEK_API_KEY}",
+      "models": {
+        "deepseek-v4-flash": {},
+        "deepseek-v4-pro": {}
+      }
+    },
+    "ollama": {
+      "api": "openai-chat",
+      "url": "http://localhost:11434",
+      "completionUrlRelativePath": "/v1/chat/completions",
+      "httpClient": {
+        "version": "http-1.1"
+      },
+      "models": {
+          "gemma2:2b": {},
+          "qwen2.5-coder:7b": {}
+      }
+    }
+  },
+  "mcpServers": {
+    "mcp-bash": {
+      "command": "/root/git/mcp/mcp_server.sh",
+      "args": [],
+      "env": {
+        "MY_GIT_DIR": "/root/git",
+        "DEBUG": "true"
+      }
+    },
+    "storm-mcp": {
+      "command": "/root/git/storm/storm-mcp.sh",
+      "args": [],
+      "env": {
+        "MY_GIT_DIR": "/root/git",
+        "DEBUG": "true"
+      }
+    }
+  },
+  "toolCall": {
+    "approval": {
+      "allow": {
+        "mcp-bash": {},
+        "storm-mcp": {},
+        "eca__git": {},
+        "eca__shell_command": {
+          "argsMatchers": {
+            "command": [".*my_warp\\.sh.*--lib mcp.*-[sbk].*"]
+          }
+        },
+        "eca__read_file": {
+          "argsMatchers": {
+              "path": ["/root/git/.*", "/root/.cache/.*", "/tmp/.*"]
+          }
+        },
+        "eca__grep": {
+          "argsMatchers": {
+              "path": ["/root/git/.*", "/root/.cache/.*", "/tmp/.*"]
+          }
+        },
+        "eca__write_file": {
+          "argsMatchers": {
+              "path": ["/root/git/.*", "/root/.cache/.*", "/tmp/.*"]
+          }
+        },
+        "eca__edit_file": {
+          "argsMatchers": {
+              "path": ["/root/git/.*", "/root/.cache/.*", "/tmp/.*"]
+          }
+        }
+      },
+      "deny": {
+        "eca__git": {
+          "argsMatchers": {
+            "command": [".*\\bgit\\s+push\\b.*"],
+            "operation": ["push"]
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://eca.dev/config.json"
+}
