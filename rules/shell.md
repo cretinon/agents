@@ -1,0 +1,103 @@
+---
+agent: code
+paths: "**.sh"
+enforce:
+  - read
+  - modify
+---
+
+#  AI Agent Guidelines & Rules: Rules for Shell Scripting
+
+You are an expert systems engineer and Shell scripting authority. 
+Always follow these explicit rules when writing, refactoring or reviewing Shell code in this project.
+Read `${MY_GIT_DIR}/shell/functions.md` if you need definitions of functions used in this document.
+
+---
+## Conventions
+### Naming Conventions
+- Library functions must start with a single underscore (e.g. `_usage`).
+- Local variables must start with a double underscore (e.g. `__line`).
+- Global variables must be written in capital (e.g. GREP).
+
+### Comment Conventions
+- **`# usage:` Comments**: Every function that is reachable from the orchestrator CLI must be documented with a `# usage:` comment line directly above its definition, e.g. `# usage: _decrypt_file --file ($1) --passphrase ($2) --remove-src ($3)`. These lines are parsed by `_usage` and `_getopt_long` to build the CLI help and option list. Keep `# usage:` lines short and with a consistent shape — they are consumed by `cut`/`sed` pipelines that strip `($1)`, `($2)`, etc.
+- **`# call:` Comments**: Every function that is not reachable from the orchestrator CLI must be documented with a `# call:` comment line directly above its definition in order to quickly see what are the function input, e.g. `# call: _load_conf ($1:file)`
+- `# usage:` and `# call:` are mutually exclusive 
+- **`# description:` Comments**: Every function must be documented with a `# description:` comment line directly below its `# usage:` or `# call:` in order to resume in 2 lines maximum what the function do.
+- **`# return:` Comments**: Every function must be documented with a `# return:` comment line directly below its `# description`. Only 3 cases :
+   * `# return: always 0` : when the function only return 0
+   * `# return: any` : all other cases
+
+---
+
+## Shell best practices
+- Always quote variable expansions to prevent word splitting/globbing (e.g. use `"$__dashboard_id"` instead of `$__dashboard_id`).
+- Use `local LC_ALL=C` in functions that do case conversion, regex matching, or locale-sensitive formatting so behavior is deterministic regardless of the environment locale.
+- There is no max-length for line length
+
+---
+
+## Validation Primitive
+- Check for variable presence using the utility functions `_exist`.
+- Check for file existence using `_fileexist`.
+- Check for function existence using `_func_exist`.
+- Check for installed binaries using `_installed`.
+- Every function must validate all its arguments at the top, before doing any work, using validation primitive
+- Optional arguments (those with a default) must still be validated **when present**: check their value against the allowed set using `[ ]` or a dedicated `_json_*`-style helper
+- Wrapper functions must validate their own arguments before delegating; a callee's validation is not a substitute.
+
+---
+
+## Local variable
+- If the function needs to output any data, a local variable `__result` must be declared at the beginning of the function. 
+- The only way to output result of the function is `echo "$__result"` 
+- Logs emitted via `_info`, `_warning` and `_error` are **not** the function result and are not subject to this rule
+
+---
+
+## Return Codes
+- `0` — success.
+- `1` — generic error/failure.
+- `$ERROR_ARGV` — argument/validation error.
+- Always `return` a non-zero code on error; never silently swallow a failure.
+
+---
+
+## Commands to avoid
+- Avoid raw `grep` in favor of the preconfigured `$GREP` (enforced by lint).
+- Avoid raw `curl` in favor of the `_curl` function (except in `_curl` function itself).
+- Avoid raw `jq` in favor of a  `_json_*` function (except in `_json_*` functions themselves).
+- Use as often as possible functions defined in `${MY_GIT_DIR}/shell/functions.md` 
+
+---
+
+## Logger & Output Helpers
+### Logger
+- Output standardized logs using `_info` or `_warning` depending on severity
+- Output error using `_error`. Never use `echo` or `print` to output an error
+- Standard error message must include the uppercase argument name (e.g. if there is an error on argument or variable `__pass` then use `_error "PASS: then your message"`)
+
+### Telemetry hook
+- Every library function must invoke `_func_start "$@"` at its entry point. 
+- Every library function must invoke, on the same line, `_func_end` before **every** `return` including error and early-exit paths.
+- The `_func_end` must always take the same parameter as the `return` call.
+- When returning a non-zero value we must invoke, on the same line, `_error` or `_warning` before any `_func_end`.
+- Examples :
+    - a function that return a success value : `_func_end "0" ; return "0"`
+    - a function that return a generic error/failure : `_error "FILE: $__file not found" ; _func_end "1" ; return "1"`
+    - a function that return an  argument/validation error :  `_error "FILE: $__file not found" ; _func_end "$ERROR_ARGV" ; return "$ERROR_ARGV"`
+    - a function that forward a return code : `_func_end "$__return" ; return "$__return"`
+
+---
+
+## Lint Exemption
+- When a line intentionally violates a lint rule there will be a `# no _shellcheck` comment to that line so the custom lint rules skip it. Never ever add a lint exemption yourself. Lint exemption is done only by code owner.
+- Existing exemptions are already marked and must be preserved during refactors
+
+
+---
+
+## Test Synchronization Rules
+- **Test-Code Parity**: Every change to a shell script in requires a matching update or addition in the `bats/` directory.
+- **Regression Prevention**: Do not modify existing script behavior without updating the corresponding `@test` blocks in the relevant `.bats` file.
+- **Dry-Run Validation**: After modifying any script or test, the agent MUST execute the BATS suite locally using `bats bats/` to verify a 100% pass rate before declaring the task finished.
