@@ -13,20 +13,26 @@ README.md          This file
 rules/             Path-scoped agent rules (loaded per file-path glob)
   shell.md         Rule applied when reading/writing **.sh files
   bats.md          Rule applied when reading/writing **.bats files
+  language.md      Global project rule: always respond in English
+  AI_dev.md        Global project rule: phased AI development workflow
 skills/            Agent skills (loaded by name when the task matches)
   bats/            BATS test-suite management skill (SKILL.md)
+eca/               ECA configuration assets
+  config.json      The ECA configuration consumed by ~/.config/eca/config.json
 ```
 
 ## How ECA loads these
 
-`~/.config/eca/config.json` (a symlink to `$MY_GIT_DIR/ma-emacs/eca_config.json`)
+`~/.config/eca/config.json` (a symlink to `$MY_GIT_DIR/agents/eca/config.json`)
 references these paths:
 
 ```json
 {
   "rules": [
     { "path": "~/git/agents/rules/shell.md" },
-    { "path": "~/git/agents/rules/bats.md" }
+    { "path": "~/git/agents/rules/bats.md" },
+    { "path": "~/git/agents/rules/language.md" },
+    { "path": "~/git/agents/rules/AI_dev.md" }
   ],
   "skills": [
     { "path": "~/git/agents/skills/bats" }
@@ -38,14 +44,15 @@ references these paths:
   `shell.md` matches `**.sh`, `bats.md` matches `**.bats` (frontmatter `paths` glob).
 - **Skills** are loaded on demand when a task matches the skill `description`
   (e.g. the `bats` skill for writing/refactoring `.bats` test files).
-
-The global workflow rules (`eca_AI_dev.md`, `eca_language.md`) live in
-`$MY_GIT_DIR/ma-emacs/` and are symlinked from `~/.config/eca/rules/`.
+- **Rules without a `paths` glob** (e.g. `language.md`, `AI_dev.md`) load as
+  project/workspace rules and apply to the whole session regardless of the file
+  being touched.
 
 ## Conventions
 
-- **YAML frontmatter** is required on every rule (`agent`, `paths`, `enforce`) and skill
-  (`name`, `description`). A rule without valid frontmatter is silently ignored by ECA.
+- **YAML frontmatter** is recommended on every rule (`agent`, `paths`, `enforce`) and skill
+  (`name`, `description`). `paths` is what makes a rule path-scoped; a rule **without** a
+  `paths` glob is loaded as a project/workspace rule (e.g. `language.md`).
 - **Enforcement**: `enforce: read, modify` means ECA must surface the rule before both
   reading and editing a matching file.
 - **Keep rules aligned with the authoritative project docs**: the real development rules

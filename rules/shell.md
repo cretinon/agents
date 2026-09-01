@@ -100,4 +100,4 @@ Read `${MY_GIT_DIR}/shell/functions.md` if you need definitions of functions use
 ## Test Synchronization Rules
 - **Test-Code Parity**: Every change to a shell script in requires a matching update or addition in the `bats/` directory.
 - **Regression Prevention**: Do not modify existing script behavior without updating the corresponding `@test` blocks in the relevant `.bats` file.
-- **Dry-Run Validation**: After modifying any script or test, the agent MUST execute the BATS suite locally using `bats bats/` to verify a 100% pass rate before declaring the task finished.
+- **Dry-Run Validation**: After modifying any script or test, the agent MUST execute the BATS suite through the sanctioned wrapper (`${MY_GIT_DIR}/shell/my_warp.sh --lib <lib> -b`) to verify a 100% pass rate before declaring the task finished — never by invoking the raw `bats` binary directly.
