@@ -66,7 +66,8 @@ Read `${MY_GIT_DIR}/shell/functions.md` if you need definitions of functions use
 ## Commands to avoid
 - Avoid raw `grep` in favor of the preconfigured `$GREP` (enforced by lint).
 - Avoid raw `curl` in favor of the `_curl` function (except in `_curl` function itself).
-- Avoid raw `jq` in favor of a  `_json_*` function (except in `_json_*` functions themselves).
+- Avoid raw `jq` in favor of a `_json_*` helper function (except in `_json_*` functions themselves).
+- Avoid raw `git` in favor of a `_git_*` helper function (except in `_git_*` functions themselves).
 - Use as often as possible functions defined in `${MY_GIT_DIR}/shell/functions.md` 
 
 ---
