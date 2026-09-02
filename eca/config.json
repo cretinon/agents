@@ -71,7 +71,10 @@
         "eca__git": {},
         "eca__shell_command": {
           "argsMatchers": {
-            "command": [".*my_warp\\.sh.*--lib mcp.*-[sbk].*"]
+            "command": [
+              ".*my_warp\\.sh.*--lib mcp.*-[sbk].*",
+              "^(?:wc|ls|grep|head|tail|file|stat|du|df|pwd|date|realpath|dirname|basename|which|type)\\b[^;&|`\"'$()<>]*$"
+            ]
           }
         },
         "eca__read_file": {
