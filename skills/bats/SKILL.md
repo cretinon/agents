@@ -100,23 +100,30 @@ The agent cannot assume a test passes based on generation alone. It must run val
 > **⚠️ NEVER run raw `bats`, `shellcheck`, or `kcov` binaries directly.** The project's
 > sanctioned quality gate is the orchestrator wrapper (`shell/AGENTS.md` → Pre-Commit
 > Verification Gate). It applies the project's custom lint rules and runtime setup that a
-> direct binary invocation bypasses. ALWAYS use:
+> direct binary invocation bypasses. ALWAYS use the wrapper:
 >
 > ```shell
-> # Full BATS suite for a library (LIB = shell, mcp, storm, ...)
-> ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b
-> # ShellCheck (syntax + project lint rules)
+> # Run ONLY the tests you wrote/modified (LIB = shell, mcp, storm, ...)
+> ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '^<name-of-the-test-you-wrote>$'
+> ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '<unique-substring>'
+> ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '<test-a>|<test-b>'
+> # ShellCheck (syntax + project lint rules) — allowed for any agent
 > ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -s
-> # kcov code coverage (must stay above the project threshold)
+> # kcov code coverage — run ONLY by the code_reviewer sub-agent
 > ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -k AI
 > ```
 
-1. **Run Full Suite (mandatory):** `${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b`
+1. **Run your own tests (mandatory):** after adding/modifying `@test` blocks, run exactly those
+   tests through the wrapper filter — `${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '<filter>'`
+   — and verify they pass (exit code `0`). Never run the full `-b` without a filter.
 2. **Run Single File (debugging only):** a raw `bats bats/specific_feature.bats` may be used
    *locally* to iterate quickly, but it bypasses the wrapper's custom lint/setup — the final
-   verification before finishing a task MUST always be the full wrapper gate
-   (`my_warp.sh --lib "$LIB" -s -b -k`, exit code `0` each).
-3. **Run with Pretty Formatting:** the wrapper handles formatting; do not add raw
+   verification of the code you wrote MUST use the wrapper with a filter
+   (`my_warp.sh --lib "$LIB" -b '<your-tests>'`, exit code `0`).
+3. **Full suite & coverage (reviewer only):** the full wrapper gate
+   (`my_warp.sh --lib "$LIB" -s -b -k`, exit code `0` each) is run only by the `code_reviewer`
+   sub-agent before commit / PR / task completion — do not run it yourself.
+4. **Run with Pretty Formatting:** the wrapper handles formatting; do not add raw
    `bats --formatter ...` invocations to scripts or CI.
 
 ### Error Interpretation & Remediation Matrix

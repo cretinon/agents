@@ -57,8 +57,10 @@ references these paths:
   reading and editing a matching file.
 - **Keep rules aligned with the authoritative project docs**: the real development rules
   live in `${MY_GIT_DIR}/shell/AGENTS.md`; these agent rules restate/enforce subsets of
-  them (e.g. the BATS suite MUST be run through `my_warp.sh --lib <lib> -b`, never raw
-  `bats`). When the project rules change, update these files in the same commit.
+  them (e.g. tests MUST be run through `my_warp.sh --lib <lib> -b` — developers run only
+  the tests they wrote via a filter regex, while the `code_reviewer` sub-agent runs the
+  full `-s|-b|-k` gate — never raw `bats`). When the project rules change, update these
+  files in the same commit.
 - **Testing**: these are markdown assets, not code — the `shell`/`mcp` quality gate
   (`-s`/`-b`/`-k`) does not apply. Validate by re-reading the file and checking ECA loads
   it (`eca-info` skill) after changes.

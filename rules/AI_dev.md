@@ -5,7 +5,7 @@ agent: code
 
 You must strictly adhere to the following phased workflow for any development task, modification, or bug fix. Do not skip any steps or execute code before receiving explicit user approval.
 
-> **Trivial changes** — typos, renames, or one-line fixes with no behavioral impact — may skip Phases 1–2. Announce the change in one line and implement it directly, then still run Phase 4 (Quality Assurance) and Phase 5 (Final Summary).
+> **Trivial changes** — typos, renames, or one-line fixes with no behavioral impact — may skip Phases 1–2. Announce the change in one line and implement it directly, then still run the scoped Phase 4 (Quality Assurance — your own tests only) and Phase 5 (Final Summary).
 
 ---
 
@@ -17,7 +17,7 @@ Before writing, editing, or running any code or commands, you must construct a s
    - High-level approach and objective.
    - Files to create, modify, or delete.
    - Core implementation steps.
-   - Strategy for linting, testing, and verifying code coverage.
+   - Strategy for linting and for testing the code you write — scoped to your **own** tests (the full suite and code coverage are run only by the `code_reviewer` sub-agent, see Phase 4).
 3. **Present Plan:** Output the plan clearly to the user using the following format:
 
 > ### Proposed Implementation Plan
@@ -28,7 +28,7 @@ Before writing, editing, or running any code or commands, you must construct a s
 > **Steps:**
 > 1. [Step 1]
 > 2. [Step 2]
-> **Testing Strategy:** [How tests, linting, and coverage will be validated]
+> **Testing Strategy:** [How YOUR tests and lint will be validated (scoped, never the full suite); full-suite and coverage are run by the `code_reviewer` sub-agent during the review]
 >
 > ---
 > *Please reply to validate this plan or request adjustments before proceeding.*
@@ -53,14 +53,21 @@ Once approved, execute the plan precisely as agreed upon.
 
 ---
 
-## Phase 4: Quality Assurance & Verification
-After code changes are complete, run the project's **own** validation suite as defined in the project's `AGENTS.md` — never the raw binaries when a project mandates a wrapper (e.g. `my_warp.sh --lib <lib> -s|-b|-k`).
+## Phase 4: Quality Assurance & Verification (scoped)
 
-1. **Linter:** Run the project's linter and resolve all errors and warnings introduced by your changes.
-2. **Test Suite:** Run the project's test suite and verify all tests pass. If existing tests fail or new code requires coverage, add/update tests accordingly.
-3. **Code Coverage:** Run the coverage tool and verify that new and modified code meets the project's coverage threshold.
+Run only the tests **you** wrote or modified — never the whole project suite, unless you are the `code_reviewer` sub-agent. All checks go through the project's **own** wrapper as defined in the project's `AGENTS.md` (e.g. `my_warp.sh --lib <lib> -s|-b|-k`) — never the raw binaries when a project mandates a wrapper.
 
-Report each verification result to the user.
+1. **Linter:** Run the project's linter (`-s`) and resolve all errors and warnings introduced by your changes. Full-library linting is allowed for any agent.
+2. **Your tests only:** Run the BATS subset matching the `@test` blocks you added or modified, through the wrapper with a filter regex:
+   ```shell
+   ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '^<name-of-the-test-you-wrote>$'  # exact test
+   ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '<unique-substring>'              # one test
+   ${MY_GIT_DIR}/shell/my_warp.sh --lib "$LIB" -b '<test-a>|<test-b>'               # several tests
+   ```
+   Verify your tests pass (exit code `0`). If you need to debug interactions with neighbouring tests you may run any **filtered** subset — never the full `-b` without a filter.
+3. **Coverage:** Do **not** run the coverage tool (`-k`) yourself — coverage is run only by the `code_reviewer` sub-agent.
+
+Report the results of the checks **you** ran to the user. The full-suite and coverage results are reported by the `code_reviewer` sub-agent during the review that precedes commit / PR / task completion (see `code_review.md`).
 
 ---
 
@@ -70,6 +77,6 @@ Conclude the process by presenting a concise final summary of the work done:
 - **Summary of Changes:** High-level description of what was implemented.
 - **Verification Results:**
   - Linter status (Passed/Clean)
-  - Test suite status (Pass count / Fail count)
-  - Code coverage status (Percentage / Metrics, vs. the project threshold)
+  - Own-tests status (Pass count / Fail count — the filtered subset you ran)
+  - Full suite & code coverage: run by the `code_reviewer` sub-agent during the review (results reported there)
 - **Next Steps / Recommendations:** (If applicable)
