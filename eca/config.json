@@ -15,6 +15,9 @@
     },
     {
       "path": "~/git/agents/rules/code_review.md"
+    },
+    {
+      "path": "~/git/agents/rules/delegation.md"
     }
   ],
   "agent": {
@@ -34,6 +37,65 @@
         "mcp-bash__commit_message"
       ],
       "maxSteps": 60
+    },
+    "howto_master": {
+      "mode": [
+        "subagent"
+      ],
+      "description": "USE FOR EVERY 'how to' QUESTION (ECA configuration, tools, editors, OS, anything practical). Spawn me whenever the user asks 'how do I ...?': I answer instantly and concisely from my own knowledge, no tools needed. Do NOT answer how-to questions inline yourself.",
+      "systemPrompt": "You are `howto_master`, a read-only sub-agent specialized in answering all \"how to\" questions with clear, step-by-step, practical guidance.\n\n## Your role\n- You answer ONLY \"how to\" questions (e.g. \"how do I configure X?\", \"how do I do Y?\"). Return concise, accurate, actionable instructions.\n- You are read-only: you NEVER create, edit, or delete files, and you NEVER run shell commands or git operations — the tools for that are disabled for you.\n\n## How to answer\n1. Give the answer directly first, then the step-by-step how-to.\n2. If the question is ambiguous or too broad, pick the most common interpretation and state your assumption(s) briefly.\n3. Be concise; prefer numbered steps and short code/config snippets over prose.\n\n## Output\nReturn a self-contained final answer to the parent agent (which relays it to the user). Do not ask follow-up questions; do not request more tools.",
+      "disabledTools": [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "move_file",
+        "grep",
+        "directory_tree",
+        "shell_command",
+        "git",
+        "spawn_agent",
+        "bg_job",
+        "task",
+        "skill",
+        "fetch_rule",
+        "editor_diagnostics",
+        "ask_user",
+        "compact_chat",
+        "storm-mcp",
+        "mcp-bash__RTFM",
+        "mcp-bash__deepseek_balance",
+        "mcp-bash__commit_all",
+        "mcp-bash__commit_show",
+        "mcp-bash__commit_message"
+      ],
+      "maxSteps": 40
+    },
+    "explorer": {
+      "mode": [
+        "subagent"
+      ],
+      "description": "READ-ONLY codebase search specialist. Use to find, grep, and read files inside the user's projects when you need facts from their code; never edits anything. NOT for 'how to' questions - those go to howto_master.",
+      "disabledTools": [
+        "write_file",
+        "edit_file",
+        "move_file",
+        "spawn_agent",
+        "git",
+        "mcp-bash__commit_all",
+        "mcp-bash__commit_show",
+        "mcp-bash__commit_message"
+      ]
+    },
+    "general": {
+      "mode": [
+        "subagent"
+      ],
+      "description": "General-purpose agent for complex multi-step research and execution tasks; works in parallel units and returns compact results. NOT for 'how to' questions - those go to howto_master; NOT for simple codebase lookups - use explorer.",
+      "disabledTools": [
+        "mcp-bash__commit_all",
+        "mcp-bash__commit_show",
+        "mcp-bash__commit_message"
+      ]
     }
   },
   "skills": [
