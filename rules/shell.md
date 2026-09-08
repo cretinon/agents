@@ -24,9 +24,22 @@ Read `${MY_GIT_DIR}/shell/functions.md` if you need definitions of functions use
 - **`# call:` Comments**: Every function that is not reachable from the orchestrator CLI must be documented with a `# call:` comment line directly above its definition in order to quickly see what are the function input, e.g. `# call: _load_conf ($1:file)`
 - `# usage:` and `# call:` are mutually exclusive 
 - **`# description:` Comments**: Every function must be documented with a `# description:` comment line directly below its `# usage:` or `# call:` in order to resume in 2 lines maximum what the function do.
-- **`# return:` Comments**: Every function must be documented with a `# return:` comment line directly below its `# description`. Only 3 cases :
-   * `# return: always 0` : when the function only return 0
-   * `# return: any` : all other cases
+- **`# example:` Comments**: Every function must be documented with at least one `# example:` comment line directly below its `# description:` and above its `# return:` lines, showing concrete calls, e.g. `# example: _get_techno "vmware,veeam"` — list every techno except those matching `vmware` or `veeam`.
+- **`# return:` Comments**: Every function must be documented with `# return:` comment lines directly below its `# description:` / `# example:` lines — one line per possible exit code (see the Return Codes section: `0` success, `1` generic error/failure, `$ERROR_ARGV` argument/validation error), each stating the code and the condition that produces it. Examples:
+
+  ```bash
+  # return: `0` — success.
+  # return: `1` — API request failed.
+  # return: `10` (`ERROR_ARGV`) — `STORM_TOKEN`/`STORM_BASE_URL` missing, or `jq` not installed.
+  ```
+
+  A function that always returns `0` and echoes its result still documents that single outcome, e.g. `# return: 0` — outputs the PIN on stdout. The `# return-inline:` tag is **not allowed** — always use `# return:`.
+- **`# doc-*:` Markers (functions.md generation)**: optional file/section-level documentation markers parsed by `_doc` when the `functions.md` reference is regenerated:
+   * `# doc-section: <name>`: starts a new section in the generated reference; the functions below are grouped under `<name>` until the next `# doc-section:` marker.
+   * `# doc-top:`: block of lines inserted at the top of the generated document.
+   * `# doc-bottom:`: block of lines appended at the end of the generated document.
+   * `# doc-intro:`: block of lines inserted at the top of the current `# doc-section`.
+   * `# doc-verbatim:`: block of lines copied verbatim into the generated document (e.g. required runtime setup shown before the documented functions).
 
 ---
 
