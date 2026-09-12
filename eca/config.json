@@ -18,6 +18,9 @@
     },
     {
       "path": "~/git/agents/rules/delegation.md"
+    },
+    {
+      "path": "~/git/agents/rules/readfirst.md"
     }
   ],
   "agent": {
