@@ -19,6 +19,9 @@ skills/            Agent skills (loaded by name when the task matches)
   bats/            BATS test-suite management skill (SKILL.md)
 eca/               ECA configuration assets
   config.json      The ECA configuration consumed by ~/.config/eca/config.json
+  client.json      PUBLIC OAuth (CIMD) client metadata document, served by jsDelivr
+  bridges/         stdio <-> HTTP bridges ECA starts as local MCP servers
+    stordata_bridge.py   Bridges ECA to https://services.stordata.fr/mcp (OAuth/CIMD)
 ```
 
 ## How ECA loads these
@@ -64,3 +67,81 @@ references these paths:
 - **Testing**: these are markdown assets, not code — the `shell`/`mcp` quality gate
   (`-s`/`-b`/`-k`) does not apply. Validate by re-reading the file and checking ECA loads
   it (`eca-info` skill) after changes.
+
+## StorM (`stordata`) MCP bridge
+
+ECA speaks **stdio** to local MCP servers, while the StorM MCP server
+(`https://services.stordata.fr/mcp`) is **remote**, OAuth-protected, and implements the
+stateless **`2026-07-28`** MCP revision. `eca/bridges/stordata_bridge.py` bridges the two:
+streamable HTTP + OAuth towards StorM (official `mcp` Python SDK), plain stdio JSON-RPC
+towards ECA. The remote `initialize` no longer exists, so the bridge answers it locally from
+`server/discover`, and it stamps every request with the `mcp-protocol-version` / `mcp-method`
+(and, for name-bearing methods, `mcp-name`) headers plus the `_meta` envelope.
+
+Authentication uses **CIMD** (OAuth Client ID Metadata Document): the `client_id` is the
+HTTPS URL of `eca/client.json`, because that authorization server offers no dynamic client
+registration. Its redirect matching only accepts the HTTPS localhost callback listed in that
+document, so the bridge serves its OAuth callback over TLS with a **self-signed certificate**.
+
+### Start everything (first time)
+
+```shell
+# 1. the bridge's private virtualenv (kept outside the repo)
+python3 -m venv /root/.local/share/eca/mcp-bridge-venv
+/root/.local/share/eca/mcp-bridge-venv/bin/pip install mcp
+
+# 2. publish the CIMD document — it is PUBLIC: commit, push, then refresh the CDN cache
+#    (after ANY edit of eca/client.json; the authorization server fetches it live)
+git -C "$MY_GIT_DIR/agents" add eca/client.json eca/config.json eca/bridges/stordata_bridge.py
+git -C "$MY_GIT_DIR/agents" commit -m "…"
+git -C "$MY_GIT_DIR/agents" push
+#    then purge: https://purge.jsdelivr.net/gh/cretinon/agents@main/eca/client.json
+
+# 3. check what ECA will read: eca/config.json -> mcpServers.stordata
+#    command = /root/.local/share/eca/mcp-bridge-venv/bin/python
+#    args    = ["$MY_GIT_DIR/agents/eca/bridges/stordata_bridge.py"]
+#    (all bridge defaults apply: TLS on, https://localhost:19284/auth/callback, 2026-07-28)
+
+# 4. sign in once: prints the authorization URL (and tries to open a browser),
+#    waits on the TLS callback, then caches the tokens
+/root/.local/share/eca/mcp-bridge-venv/bin/python \
+  "$MY_GIT_DIR/agents/eca/bridges/stordata_bridge.py" --login-only
+
+# 5. restart ECA (or restart the `stordata` server from the MCP settings buffer),
+#    then verify it reports the server as running with 4 tools
+```
+
+`--login-only` prints the server info and the tool list to **stderr** (`getInventoryModel`,
+`getInventoryFields`, `getPerformanceCounters`, `getMetrics`). A quick end-to-end check of the
+stdio side (ECA keeps stdin open, so hold it open here too):
+
+```shell
+{ printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; sleep 20; } \
+  | /root/.local/share/eca/mcp-bridge-venv/bin/python "$MY_GIT_DIR/agents/eca/bridges/stordata_bridge.py"
+```
+
+### State (never in this repository)
+
+| Path | Content | Mode |
+|---|---|---|
+| `/root/.local/state/eca/mcp-bridge/stordata.json` | OAuth tokens + client info | `0600` |
+| `/root/.local/state/eca/mcp-bridge/callback-key.pem` | self-signed callback private key | `0600` |
+| `/root/.local/state/eca/mcp-bridge/callback-cert.pem` | matching certificate | `0644` |
+
+`eca/client.json` is published on a public CDN: it must never contain a secret.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `method not found` / `404` on `initialize` | the server only speaks `2026-07-28`; the bridge answers `initialize` locally |
+| browser: `redirect_uri … does not match` | `eca/client.json` was edited without commit+push (+CDN purge), or it no longer lists `https://localhost:19284/auth/callback` |
+| `Missing required header "mcp-protocol-version"` / `"mcp-method"` | a wrong `--protocol-version` is being stamped; keep the default `2026-07-28` |
+| browser certificate warning after consent | expected: the callback is served with a self-signed localhost certificate (Advanced → Proceed) |
+| ECA shows the server `failed` with 0 tools | run `--login-only` to (re)authenticate, then restart the server in ECA |
+| need diagnostics | add `--verbose` to the bridge `args` — logs go to stderr, stdout stays the MCP channel |
+
+Open points and known limitations are tracked in `Todo.md`.
