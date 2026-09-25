@@ -152,7 +152,7 @@
     },
     "stordata": {
         "url": "https://services.stordata.fr/mcp",
-        "clientId": "https://raw.githubusercontent.com/cretinon/agents/refs/heads/main/eca/eca-client.json",
+        "clientId": "https://cdn.jsdelivr.net/gh/cretinon/agents@main/eca/client.json",
         "clientName": "ECA (Editor Code Assistant)",
         "oauthPort": 19284
     }
