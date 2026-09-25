@@ -1,6 +1,6 @@
 # Projects managed 
 
-The `commit_all` / `commit_show` tooling manages these 9 projects (default `MCP_COMMIT_PROJECTS`), all resolved under `$MCP_COMMIT_ROOT`/`$MY_GIT_DIR`:
+The `commit_all` / `commit_show` tooling manages these 10 projects (default `MCP_COMMIT_PROJECTS`), all resolved under `$MCP_COMMIT_ROOT`/`$MY_GIT_DIR`:
 
 > **Runtime source of truth**: the list itself lives in `${MY_GIT_DIR}/mcp/conf/mcp.conf`, in the `MCP_COMMIT_PROJECTS` variable (an exported environment variable of the same name overrides it). This table documents that configuration — to add or remove a managed project, edit `conf/mcp.conf` first, then mirror the change here.
 
@@ -15,3 +15,4 @@ The `commit_all` / `commit_show` tooling manages these 9 projects (default `MCP_
 | `ma-cgr`   | (personal project)                                                     |
 | `ansible`  | Ansible playbooks                                                      |
 | `tofu`     | Opentofu |
+| `docker`   | Docker library (`lib_docker.sh`) + stack | 
