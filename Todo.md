@@ -56,7 +56,5 @@ first made the bridge work. Secret scan came back clean.
 
 ## 4. Repository
 
-- **No `.gitignore`**: `__pycache__/`, `*.pyc`, `.venv/` can be committed by accident (an
-  untracked `__pycache__` already appeared twice during this work).
 - **No lint/CI for the Python bridge**: nothing runs `ruff`/`black`/`mypy`, and the repository
   has no test runner for it (the `shell`/`mcp` gate deliberately does not apply here).

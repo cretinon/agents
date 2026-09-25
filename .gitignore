@@ -1,0 +1,4 @@
+# Python (the ECA bridges under eca/bridges/)
+__pycache__/
+*.py[cod]
+.venv/
