@@ -1,5 +1,5 @@
 {
-  "client_id": "https://https://raw.githubusercontent.com/cretinon/agents/refs/heads/main/eca/eca-client.json",
+  "client_id": "https://raw.githubusercontent.com/cretinon/agents/refs/heads/main/eca/eca-client.json",
   "client_name": "ECA (Editor Code Assistant)",
   "redirect_uris": ["https://localhost:19284/auth/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
