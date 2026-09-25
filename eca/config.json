@@ -151,10 +151,8 @@
       }
     },
     "stordata": {
-        "url": "https://services.stordata.fr/mcp",
-        "clientId": "https://cdn.jsdelivr.net/gh/cretinon/agents@main/eca/client.json",
-        "clientName": "ECA (Editor Code Assistant)",
-        "oauthPort": 19284
+      "command": "/root/.local/share/eca/mcp-bridge-venv/bin/python",
+      "args": ["/root/git/agents/eca/bridges/stordata_bridge.py"]
     }
   },
   "toolCall": {
