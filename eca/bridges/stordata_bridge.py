@@ -19,7 +19,8 @@ sent to the authorization server is the HTTPS URL of the client metadata
 document hosted for this bridge (`--client-metadata-url`), because that server
 offers no dynamic client registration. Its redirect matching only accepts the
 HTTPS localhost callback listed in the document, so the bridge serves its OAuth
-callback over TLS with a self-signed certificate.
+callback over TLS with a self-signed certificate, bound to the loopback
+interface only.
 
 stdout is the MCP channel and carries JSON-RPC messages only; every log line
 goes to stderr.
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -76,16 +78,47 @@ DEFAULT_CLIENT_METADATA_URL = "https://cdn.jsdelivr.net/gh/cretinon/agents@main/
 DEFAULT_SCOPE = "openid mcp"
 # The remote server is 2026-07-28-only (it rejects 2025-06-18 as unsupported).
 DEFAULT_PROTOCOL_VERSION = "2026-07-28"
+# Versions the bridge is willing to echo to a legacy client; anything else is clamped
+# (and logged) because the upstream traffic is always stamped with the modern version.
+LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+DEFAULT_LEGACY_PROTOCOL_VERSION = "2025-06-18"
 # This authorization server only accepts the HTTPS localhost callback listed in the
 # CIMD document (a plain http://127.0.0.1 one is rejected as "does not match").
 DEFAULT_CALLBACK_HOST = "localhost"
 DEFAULT_CALLBACK_PORT = 19284
 DEFAULT_CALLBACK_PATH = "/auth/callback"
+DEFAULT_DISCOVER_TIMEOUT = 30.0
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "eca" / "mcp-bridge"
 DISCOVER_REQUEST_ID = "stordata-bridge/discover"
 SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
 BRIDGE_CLIENT_INFO = {"name": "stordata-bridge", "version": "0.0.1"}
-LOCAL_METHODS = ("initialize", "ping")
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers
+# --------------------------------------------------------------------------- #
+
+
+def _chmod_quiet(path: Path, mode: int) -> None:
+    """Best-effort chmod: permissions are a hardening step, never a fatal error."""
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:  # pragma: no cover - platform dependent
+        LOG.debug("could not chmod %s: %s", path, exc)
+
+
+def _is_loopback(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _describe(exc: BaseException) -> str:
+    """Flatten exception groups: the transports wrap their failure in a TaskGroup."""
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_describe(sub) for sub in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
 
 
 # --------------------------------------------------------------------------- #
@@ -112,6 +145,7 @@ class FileTokenStorage:
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _chmod_quiet(self.path.parent, 0o700)  # also tightens a pre-existing directory
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
             json.dump(data, handle, indent=2)
@@ -139,19 +173,34 @@ class FileTokenStorage:
 
 
 # --------------------------------------------------------------------------- #
-# OAuth: callback server, handlers
+# OAuth: loopback callback server, handlers
 # --------------------------------------------------------------------------- #
+
+
+class _CallbackState:
+    """State shared by the loopback callback servers (IPv4 and IPv6)."""
+
+    def __init__(self) -> None:
+        self.result: AuthorizationCodeResult | RuntimeError | None = None
+        self.done = threading.Event()
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
     """One-shot HTTP handler capturing the authorization code redirect."""
 
     server_version = "stordata-bridge"
+    server: ThreadingHTTPServer  # set by _make_callback_servers
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
+        client = self.client_address[0]
+        if not _is_loopback(client):
+            LOG.warning("rejecting non-loopback callback request from %s", client)
+            self.send_error(403, "the OAuth callback is loopback-only")
+            return
+
         url = urlparse(self.path)
         if url.path != self.server.callback_path:  # type: ignore[attr-defined]
-            LOG.info("ignoring non-callback request: %s", self.path)
+            LOG.info("ignoring non-callback request: %s", url.path)
             self.send_error(404, "not the OAuth callback path")
             return
 
@@ -163,17 +212,18 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         if not code and not error:
             # a browser (or a proxy) may probe the redirect URI before the real
             # redirect arrives -- log it and keep waiting for the authorization code
-            LOG.warning("ignoring callback request without code/error: %s", self.path)
+            LOG.warning("ignoring callback request without code/error: %s", url.path)
             self.send_response(204)
             self.end_headers()
             return
 
+        callback_state: _CallbackState = self.server.state  # type: ignore[attr-defined]
         if error:
-            self.server.result = RuntimeError(  # type: ignore[attr-defined]
+            callback_state.result = RuntimeError(
                 f"{error}: {params.get('error_description', [''])[0]}"
             )
         else:
-            self.server.result = AuthorizationCodeResult(code=code, state=state)  # type: ignore[attr-defined]
+            callback_state.result = AuthorizationCodeResult(code=code, state=state)
 
         body = (
             b"<html><body><h3>Authorization received</h3>"
@@ -184,10 +234,16 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        self.server.done.set()  # type: ignore[attr-defined]
+        callback_state.done.set()
 
-    def log_message(self, fmt: str, *args: object) -> None:  # silence the default stderr logs
-        LOG.debug("callback server: %s", fmt % args)
+    def log_message(self, fmt: str, *args: object) -> None:
+        """Log the request line without its query string.
+
+        The query carries the authorization `code` and `state`; `--verbose` must
+        not write them to ECA's stderr log.
+        """
+        status = args[1] if len(args) > 1 else "-"
+        LOG.debug("callback server: %s %s -> %s", self.command, urlparse(self.path).path, status)
 
 
 async def _redirect_handler(url: str, open_browser: bool) -> None:
@@ -199,34 +255,36 @@ async def _redirect_handler(url: str, open_browser: bool) -> None:
             LOG.warning("could not open a browser automatically: %s", exc)
 
 
-class _DualStackServer(ThreadingHTTPServer):
-    """Bind both IPv4 and IPv6, so `localhost` works whichever the browser picks."""
+def _make_callback_servers(host: str, port: int, handler: type[BaseHTTPRequestHandler]) -> list[ThreadingHTTPServer]:
+    """Bind the callback on the loopback interface(s) only.
 
-    address_family = socket.AF_INET6
+    `localhost` may resolve to `127.0.0.1` or `::1` depending on the browser, so
+    both loopback addresses are served -- but never a wildcard address, which
+    would let any host on the network race the redirect.
+    """
+    if host != "localhost":
+        return [ThreadingHTTPServer((host, port), handler)]  # explicit host: honour it
+    servers: list[ThreadingHTTPServer] = []
+    for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        class _LoopbackServer(ThreadingHTTPServer):
+            address_family = family
 
-    def server_bind(self) -> None:
         try:
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        except OSError:  # pragma: no cover - platform dependent
-            pass
-        super().server_bind()
-
-
-def _make_callback_server(host: str, port: int, handler: type[BaseHTTPRequestHandler]) -> ThreadingHTTPServer:
-    if host == "localhost":
-        try:
-            return _DualStackServer(("::", port), handler)
+            servers.append(_LoopbackServer((address, port), handler))
         except OSError as exc:
-            LOG.debug("IPv6 dual-stack bind failed (%s), falling back to IPv4", exc)
-        return ThreadingHTTPServer(("127.0.0.1", port), handler)
-    return ThreadingHTTPServer((host, port), handler)
+            LOG.debug("cannot bind the callback on [%s]:%d: %s", address, port, exc)
+    if not servers:
+        raise OSError(f"could not bind a loopback callback server on port {port}")
+    return servers
 
 
 def _ensure_certificate(cert_file: Path, key_file: Path) -> None:
     """Create a self-signed localhost certificate on first use (openssl)."""
-    if cert_file.exists() and key_file.exists():
-        return
     cert_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _chmod_quiet(cert_file.parent, 0o700)
+    if cert_file.exists() and key_file.exists():
+        _chmod_quiet(key_file, 0o600)  # also tighten a key created by an older version
+        return
     LOG.info("generating a self-signed certificate for localhost in %s", cert_file.parent)
     subprocess.run(
         [
@@ -239,7 +297,7 @@ def _ensure_certificate(cert_file: Path, key_file: Path) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
-    os.chmod(key_file, 0o600)
+    _chmod_quiet(key_file, 0o600)
 
 
 def _redirect_uri(args: argparse.Namespace) -> str:
@@ -249,30 +307,33 @@ def _redirect_uri(args: argparse.Namespace) -> str:
 
 def _build_callback_handler(args: argparse.Namespace):
     async def callback_handler() -> AuthorizationCodeResult:
-        server = _make_callback_server(args.callback_host, args.callback_port, _CallbackHandler)
+        servers = _make_callback_servers(args.callback_host, args.callback_port, _CallbackHandler)
+        state = _CallbackState()
         if args.tls:
             _ensure_certificate(args.cert_file, args.key_file)
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certfile=args.cert_file, keyfile=args.key_file)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
-        server.callback_path = args.callback_path  # type: ignore[attr-defined]
-        server.result = None  # type: ignore[attr-defined]
-        server.done = threading.Event()  # type: ignore[attr-defined]
+            for server in servers:
+                server.socket = context.wrap_socket(server.socket, server_side=True)
+        for server in servers:
+            server.state = state  # type: ignore[attr-defined]
+            server.callback_path = args.callback_path  # type: ignore[attr-defined]
 
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        LOG.info("waiting for the OAuth redirect on %s", _redirect_uri(args))
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+        for thread in threads:
+            thread.start()
+        LOG.info("waiting for the OAuth redirect on %s (loopback only)", _redirect_uri(args))
         try:
-            done = await asyncio.to_thread(server.done.wait, args.auth_timeout)
+            done = await asyncio.to_thread(state.done.wait, args.auth_timeout)
             if not done:
                 raise TimeoutError(f"no authorization redirect within {args.auth_timeout:.0f}s")
-            result = server.result
-            if isinstance(result, Exception):
-                raise result
-            return result  # type: ignore[return-value]
+            if isinstance(state.result, Exception):
+                raise state.result
+            return state.result  # type: ignore[return-value]
         finally:
-            server.shutdown()
-            server.server_close()
+            for server in servers:
+                await asyncio.to_thread(server.shutdown)
+                server.server_close()
 
     return callback_handler
 
@@ -361,8 +422,18 @@ class _RemoteSession:
                 capabilities[key] = dict(value)
                 if key in ("tools", "resources", "prompts"):
                     capabilities[key].setdefault("listChanged", False)
+        if requested_version in LEGACY_PROTOCOL_VERSIONS:
+            protocol_version = requested_version
+        else:
+            protocol_version = DEFAULT_LEGACY_PROTOCOL_VERSION
+            LOG.warning(
+                "client asked for protocol version %r; answering %s (the remote speaks only %s)",
+                requested_version,
+                protocol_version,
+                self.args.protocol_version,
+            )
         result = {
-            "protocolVersion": requested_version or "2025-06-18",
+            "protocolVersion": protocol_version,
             "capabilities": capabilities,
             "serverInfo": self.server_info,
         }
@@ -388,6 +459,10 @@ def _local_response(payload: dict, session: _RemoteSession) -> tuple[bool, dict 
         }
     if method == "ping":
         return True, {"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}
+    if method == "notifications/cancelled":
+        # Forwarded: the SDK transport turns this frame into aborting the in-flight
+        # POST (the 2026-07-28 wire has no client->server notification to send).
+        return False, None
     if method and method.startswith("notifications/"):
         LOG.debug("dropping client notification %s (the 2026-07-28 wire has none)", method)
         return True, None
@@ -399,32 +474,38 @@ def _local_response(payload: dict, session: _RemoteSession) -> tuple[bool, dict 
 # --------------------------------------------------------------------------- #
 
 
-def _http_headers(args: argparse.Namespace) -> dict[str, str] | None:
-    """The remote requires `mcp-protocol-version` even on the first request."""
-    if not args.protocol_version:
-        return None
-    return {"mcp-protocol-version": args.protocol_version}
-
-
-async def _discover(write, read, session: _RemoteSession) -> dict:
+async def _discover(write, read, session: _RemoteSession, timeout: float) -> dict:
+    """Open the modern session; `timeout` bounds it so startup can never hang silently."""
     payload, headers = session.stamp(
         {"jsonrpc": "2.0", "id": DISCOVER_REQUEST_ID, "method": "server/discover", "params": {}}
     )
     await _send(write, payload, headers)
-    while True:
-        item = await read.receive()
-        if isinstance(item, Exception):
-            raise item
-        data = _message_to_dict(item.message)
-        if data.get("id") == DISCOVER_REQUEST_ID:
-            if "error" in data:
-                raise RuntimeError(f"server/discover failed: {data['error']}")
-            return data.get("result") or {}
-        LOG.debug("ignoring pre-handshake message: %s", data)
+
+    async def _await_response() -> dict:
+        while True:
+            item = await read.receive()
+            if isinstance(item, Exception):
+                raise item
+            data = _message_to_dict(item.message)
+            if data.get("id") == DISCOVER_REQUEST_ID:
+                return data
+            if "error" in data and data.get("id") is None:
+                # a parse/dispatch error that does not echo our id: fail instead of looping
+                raise RuntimeError(f"server/discover rejected: {data['error']}")
+            LOG.debug("ignoring pre-handshake message: %s", data)
+
+    try:
+        data = await asyncio.wait_for(_await_response(), timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"no server/discover response within {timeout:.0f}s") from None
+    if "error" in data:
+        raise RuntimeError(f"server/discover failed: {data['error']}")
+    return data.get("result") or {}
 
 
-async def _pump_stdin(session: _RemoteSession, write) -> None:
+async def _pump_stdin(session: _RemoteSession, write, ready: asyncio.Event) -> None:
     """Forward ECA's requests to the remote session, stamping the modern envelope."""
+    waiting_logged = False
     while True:
         line = await asyncio.to_thread(sys.stdin.buffer.readline)
         if not line:
@@ -438,12 +519,23 @@ async def _pump_stdin(session: _RemoteSession, write) -> None:
         except json.JSONDecodeError as exc:
             LOG.error("ignoring unparsable stdin message: %s", exc)
             continue
-        handled, response = _local_response(payload, session)
-        if handled:
-            if response is not None:
-                _write_message(response)
+        if not isinstance(payload, dict):
+            LOG.error("ignoring non-object stdin message: %.60s", text)
             continue
         try:
+            handled, response = _local_response(payload, session)
+            if handled:
+                if response is not None:
+                    _write_message(response)
+                continue
+            if not ready.is_set():
+                if not waiting_logged:
+                    LOG.warning(
+                        "remote session still opening (first run: complete the browser sign-in, "
+                        "or run --login-only once); holding the request"
+                    )
+                    waiting_logged = True
+                await ready.wait()
             stamped, headers = session.stamp(payload)
             await _send(write, stamped, headers)
         except Exception as exc:  # keep the session alive on a bad message
@@ -466,19 +558,33 @@ async def _pump_remote(read) -> None:
         _write_message(_message_to_dict(item.message))
 
 
+async def _discover_timeout(args: argparse.Namespace, storage: FileTokenStorage) -> float:
+    """Short bound when a token is cached, generous while an interactive login may run."""
+    if await storage.get_tokens():
+        return args.discover_timeout
+    return args.auth_timeout + 60.0
+
+
 async def _run_stdio(args: argparse.Namespace) -> int:
     storage = FileTokenStorage(args.state_dir / "stordata.json")
-    async with create_mcp_http_client(headers=_http_headers(args), auth=_build_oauth_provider(args, storage)) as http_client:
+    provider = _build_oauth_provider(args, storage)
+    async with create_mcp_http_client(auth=provider) as http_client:
         async with streamable_http_client(args.url, http_client=http_client) as (read, write):
             session = _RemoteSession(args, discover={})
-            session.discover = await _discover(write, read, session)
+            ready = asyncio.Event()
+            # The stdin pump starts first so ECA's `initialize` (answered locally) never
+            # waits for the remote session -- which may need an interactive login.
+            stdin_task = asyncio.create_task(_pump_stdin(session, write, ready))
+            try:
+                session.discover = await _discover(write, read, session, await _discover_timeout(args, storage))
+            finally:
+                ready.set()
             LOG.info(
                 "connected to %s %s (%s)",
                 session.server_info.get("name"),
                 session.server_info.get("version"),
                 ", ".join(session.discover.get("supportedVersions") or []),
             )
-            stdin_task = asyncio.create_task(_pump_stdin(session, write))
             remote_task = asyncio.create_task(_pump_remote(read))
             done, pending = await asyncio.wait({stdin_task, remote_task}, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
@@ -493,10 +599,11 @@ async def _run_stdio(args: argparse.Namespace) -> int:
 async def _login_only(args: argparse.Namespace) -> int:
     """Sign in once, discover the server, list its tools, then exit."""
     storage = FileTokenStorage(args.state_dir / "stordata.json")
-    async with create_mcp_http_client(headers=_http_headers(args), auth=_build_oauth_provider(args, storage)) as http_client:
+    provider = _build_oauth_provider(args, storage)
+    async with create_mcp_http_client(auth=provider) as http_client:
         async with streamable_http_client(args.url, http_client=http_client) as (read, write):
             session = _RemoteSession(args, discover={})
-            session.discover = await _discover(write, read, session)
+            session.discover = await _discover(write, read, session, await _discover_timeout(args, storage))
             payload, headers = session.stamp({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
             await _send(write, payload, headers)
             tools: list[str] = []
@@ -508,7 +615,7 @@ async def _login_only(args: argparse.Namespace) -> int:
                 if data.get("id") == 1:
                     if "error" in data:
                         raise RuntimeError(f"tools/list failed: {data['error']}")
-                    tools = [tool["name"] for tool in (data["result"].get("tools") or [])]
+                    tools = [tool["name"] for tool in ((data.get("result") or {}).get("tools") or [])]
                     break
     print(
         json.dumps({"url": args.url, "serverInfo": session.server_info, "tools": tools}, indent=2),
@@ -546,6 +653,12 @@ def main() -> int:
         default=DEFAULT_PROTOCOL_VERSION,
         help=f"protocol version stamped on remote requests (default: {DEFAULT_PROTOCOL_VERSION})",
     )
+    parser.add_argument(
+        "--discover-timeout",
+        type=float,
+        default=DEFAULT_DISCOVER_TIMEOUT,
+        help="seconds to wait for server/discover when a token is already cached",
+    )
     parser.add_argument("--no-browser", action="store_true", help="only print the authorization URL")
     parser.add_argument("--login-only", action="store_true", help="sign in, list tools, exit")
     parser.add_argument("--verbose", action="store_true", help="debug logs on stderr")
@@ -565,7 +678,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        LOG.error("fatal: %s", exc)
+        LOG.error("fatal: %s", _describe(exc))
         if args.verbose:
             LOG.exception("details")
         return 1

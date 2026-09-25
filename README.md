@@ -81,7 +81,8 @@ towards ECA. The remote `initialize` no longer exists, so the bridge answers it 
 Authentication uses **CIMD** (OAuth Client ID Metadata Document): the `client_id` is the
 HTTPS URL of `eca/client.json`, because that authorization server offers no dynamic client
 registration. Its redirect matching only accepts the HTTPS localhost callback listed in that
-document, so the bridge serves its OAuth callback over TLS with a **self-signed certificate**.
+document, so the bridge serves its OAuth callback over TLS with a **self-signed certificate**,
+bound to the loopback interface only.
 
 ### Start everything (first time)
 
