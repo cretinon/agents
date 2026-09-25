@@ -124,6 +124,25 @@ stdio side (ECA keeps stdin open, so hold it open here too):
   | /root/.local/share/eca/mcp-bridge-venv/bin/python "$MY_GIT_DIR/agents/eca/bridges/stordata_bridge.py"
 ```
 
+### Supervision: reconnect, keep-alive and in-flight requests
+
+The bridge keeps ECA connected across remote outages — the stdio session and its tools survive
+a dropped connection, a restarted server or a network blip:
+
+| Event | What the bridge does |
+|---|---|
+| connection lost / remote unreachable | logs it and reconnects with an exponential backoff (`--reconnect-delay`, default 1 s, up to `--reconnect-max-delay`, default 60 s), re-running `server/discover` |
+| request in flight when it drops | **read-only** methods (`tools/list`, `prompts/*`, `resources/*`, `server/discover`) are replayed after the reconnect; everything else — notably `tools/call` — is answered with JSON-RPC `-32603` so ECA can retry (no double execution) |
+| request issued while disconnected | same rule: read-only ones are queued (up to `--replay-max`, default 64), the rest fail immediately |
+| remote tool set changed | after every reconnect the bridge compares `tools/list` and sends `notifications/tools/list_changed` when it differs |
+| idle connection | after `--idle-probe` seconds (default 60; `0` disables) the bridge sends a `server/discover` probe; a timeout forces a reconnect, so a dead link is noticed *before* a tool call is |
+
+Retrying is unbounded by default (`--max-reconnects N` bounds it). Because the wire is
+stateless — no session id, no event stream — there is nothing to *resume*: `Last-Event-ID`
+resumption is plumbed for future streams but is a no-op against this server. When the token has
+expired or been revoked, a reconnect triggers the interactive login again (same browser and
+self-signed-certificate warning as the first run).
+
 ### State (never in this repository)
 
 | Path | Content | Mode |
@@ -143,6 +162,10 @@ stdio side (ECA keeps stdin open, so hold it open here too):
 | `Missing required header "mcp-protocol-version"` / `"mcp-method"` | a wrong `--protocol-version` is being stamped; keep the default `2026-07-28` |
 | browser certificate warning after consent | expected: the callback is served with a self-signed localhost certificate (Advanced → Proceed) |
 | ECA shows the server `failed` with 0 tools | run `--login-only` to (re)authenticate, then restart the server in ECA |
+| browser sign-in prompt appears again | the token expired or was revoked and the bridge reconnected: complete the login (or run `--login-only` beforehand) |
+| ECA keeps the server `running` during an outage | expected: the bridge stays up and replays; check its stderr for `connection lost` / `reconnecting in` |
+| no keep-alive traffic wanted | start the bridge with `--idle-probe 0` |
+| bridge stopped with `giving up after N failed attempt(s)` | `--max-reconnects` is set; raise it or remove the flag to retry forever |
 | need diagnostics | add `--verbose` to the bridge `args` — logs go to stderr, stdout stays the MCP channel |
 
 Open points and known limitations are tracked in `Todo.md`.

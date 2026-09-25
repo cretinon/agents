@@ -14,6 +14,15 @@ name-bearing methods, `mcp-name`) HTTP headers, and an `_meta` envelope with the
 protocol version, client capabilities and client info. The bridge stamps all of
 that; ECA keeps speaking plain stdio JSON-RPC.
 
+The connection is supervised: if it drops, the bridge reconnects with an
+exponential backoff, replays the read-only requests that were in flight (and any
+issued while disconnected), answers the rest with a JSON-RPC error, and emits
+`notifications/tools/list_changed` to ECA when the remote tool set changed. An
+idle keep-alive probe (`--idle-probe`, default 60 s) notices a dead connection
+before a tool call does. Because the wire is stateless there is no session or
+event stream to resume: `Last-Event-ID` resumption is plumbed for future streams
+but is a no-op against this server.
+
 Authentication uses CIMD (OAuth Client ID Metadata Document): the `client_id`
 sent to the authorization server is the HTTPS URL of the client metadata
 document hosted for this bridge (`--client-metadata-url`), because that server
@@ -34,7 +43,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -43,6 +54,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -88,10 +100,31 @@ DEFAULT_CALLBACK_HOST = "localhost"
 DEFAULT_CALLBACK_PORT = 19284
 DEFAULT_CALLBACK_PATH = "/auth/callback"
 DEFAULT_DISCOVER_TIMEOUT = 30.0
+DEFAULT_IDLE_PROBE = 60.0
+DEFAULT_PROBE_TIMEOUT = 15.0
+DEFAULT_RECONNECT_DELAY = 1.0
+DEFAULT_RECONNECT_MAX_DELAY = 60.0
+DEFAULT_REPLAY_MAX = 64
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "eca" / "mcp-bridge"
 DISCOVER_REQUEST_ID = "stordata-bridge/discover"
+TOOLS_REQUEST_ID = "stordata-bridge/tools"
+PROBE_ID_PREFIX = "stordata-bridge/probe-"
 SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
 BRIDGE_CLIENT_INFO = {"name": "stordata-bridge", "version": "0.0.1"}
+# Requests that are safe to send again after a reconnect. `tools/call` is deliberately
+# absent: replaying it could execute a side effect twice, so it is failed instead.
+REPLAYABLE_METHODS = frozenset(
+    {
+        "server/discover",
+        "tools/list",
+        "prompts/list",
+        "prompts/get",
+        "resources/list",
+        "resources/templates/list",
+        "resources/read",
+        "ping",
+    }
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +152,14 @@ def _describe(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup):
         return "; ".join(_describe(sub) for sub in exc.exceptions)
     return f"{type(exc).__name__}: {exc}"
+
+
+def _next_delay(delay: float, maximum: float) -> float:
+    """Exponential backoff, capped (`maximum` <= 0 disables the cap)."""
+    grown = delay * 2 if delay > 0 else 1.0
+    if maximum > 0:
+        return min(grown, maximum)
+    return grown
 
 
 # --------------------------------------------------------------------------- #
@@ -247,7 +288,11 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 
 async def _redirect_handler(url: str, open_browser: bool) -> None:
-    LOG.info("authorization required, open this URL:\n\n    %s\n", url)
+    LOG.info(
+        "AUTHENTICATION REQUIRED: open this URL in a browser (a self-signed-certificate "
+        "warning on the callback page is expected):\n\n    %s\n",
+        url,
+    )
     if open_browser:
         try:
             await asyncio.to_thread(webbrowser.open, url)
@@ -370,6 +415,10 @@ def _write_message(payload: dict) -> None:
     sys.stdout.flush()
 
 
+def _error_frame(request_id: object, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": message}}
+
+
 async def _send(write, payload: dict, headers: dict[str, str]) -> None:
     message = types.jsonrpc_message_adapter.validate_json(json.dumps(payload), by_name=False)
     await write.send(SessionMessage(message, ClientMessageMetadata(headers=headers)))
@@ -442,12 +491,18 @@ class _RemoteSession:
         return result
 
 
-def _local_response(payload: dict, session: _RemoteSession) -> tuple[bool, dict | None]:
+async def _local_response(
+    payload: dict,
+    session: _RemoteSession,
+    wait_for_session=None,
+) -> tuple[bool, dict | None]:
     """Answer locally what the modern wire no longer serves; return (handled, response)."""
     method = payload.get("method")
     if method == "initialize":
         params = payload.get("params") or {}
         session.client_capabilities = params.get("capabilities") or {}
+        if wait_for_session is not None and not session.discover:
+            await wait_for_session()
         LOG.info(
             "answering initialize locally; remote speaks %s",
             ", ".join(session.discover.get("supportedVersions") or [session.args.protocol_version]),
@@ -469,16 +524,9 @@ def _local_response(payload: dict, session: _RemoteSession) -> tuple[bool, dict 
     return False, None
 
 
-# --------------------------------------------------------------------------- #
-# Session plumbing and relay
-# --------------------------------------------------------------------------- #
-
-
-async def _discover(write, read, session: _RemoteSession, timeout: float) -> dict:
-    """Open the modern session; `timeout` bounds it so startup can never hang silently."""
-    payload, headers = session.stamp(
-        {"jsonrpc": "2.0", "id": DISCOVER_REQUEST_ID, "method": "server/discover", "params": {}}
-    )
+async def _request_once(write, read, session: _RemoteSession, method: str, params: dict, request_id: str, timeout: float) -> dict:
+    """One request/response exchange, used before the read pump takes over the stream."""
+    payload, headers = session.stamp({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
     await _send(write, payload, headers)
 
     async def _await_response() -> dict:
@@ -487,75 +535,20 @@ async def _discover(write, read, session: _RemoteSession, timeout: float) -> dic
             if isinstance(item, Exception):
                 raise item
             data = _message_to_dict(item.message)
-            if data.get("id") == DISCOVER_REQUEST_ID:
+            if data.get("id") == request_id:
                 return data
             if "error" in data and data.get("id") is None:
                 # a parse/dispatch error that does not echo our id: fail instead of looping
-                raise RuntimeError(f"server/discover rejected: {data['error']}")
-            LOG.debug("ignoring pre-handshake message: %s", data)
+                raise RuntimeError(f"{method} rejected: {data['error']}")
+            LOG.debug("ignoring message while waiting for %s: %s", method, data)
 
     try:
         data = await asyncio.wait_for(_await_response(), timeout)
     except asyncio.TimeoutError:
-        raise RuntimeError(f"no server/discover response within {timeout:.0f}s") from None
+        raise RuntimeError(f"no {method} response within {timeout:.0f}s") from None
     if "error" in data:
-        raise RuntimeError(f"server/discover failed: {data['error']}")
+        raise RuntimeError(f"{method} failed: {data['error']}")
     return data.get("result") or {}
-
-
-async def _pump_stdin(session: _RemoteSession, write, ready: asyncio.Event) -> None:
-    """Forward ECA's requests to the remote session, stamping the modern envelope."""
-    waiting_logged = False
-    while True:
-        line = await asyncio.to_thread(sys.stdin.buffer.readline)
-        if not line:
-            LOG.info("stdin closed, stopping")
-            return
-        text = line.strip()
-        if not text:
-            continue
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            LOG.error("ignoring unparsable stdin message: %s", exc)
-            continue
-        if not isinstance(payload, dict):
-            LOG.error("ignoring non-object stdin message: %.60s", text)
-            continue
-        try:
-            handled, response = _local_response(payload, session)
-            if handled:
-                if response is not None:
-                    _write_message(response)
-                continue
-            if not ready.is_set():
-                if not waiting_logged:
-                    LOG.warning(
-                        "remote session still opening (first run: complete the browser sign-in, "
-                        "or run --login-only once); holding the request"
-                    )
-                    waiting_logged = True
-                await ready.wait()
-            stamped, headers = session.stamp(payload)
-            await _send(write, stamped, headers)
-        except Exception as exc:  # keep the session alive on a bad message
-            LOG.error("could not forward %s: %s", payload.get("method"), exc)
-            _write_message(
-                {
-                    "jsonrpc": "2.0",
-                    "id": payload.get("id"),
-                    "error": {"code": -32603, "message": f"bridge: {exc}"},
-                }
-            )
-
-
-async def _pump_remote(read) -> None:
-    """Forward every remote message to ECA (stdout)."""
-    async for item in read:
-        if isinstance(item, Exception):
-            LOG.error("transport error: %s", item)
-            continue
-        _write_message(_message_to_dict(item.message))
 
 
 async def _discover_timeout(args: argparse.Namespace, storage: FileTokenStorage) -> float:
@@ -565,35 +558,298 @@ async def _discover_timeout(args: argparse.Namespace, storage: FileTokenStorage)
     return args.auth_timeout + 60.0
 
 
-async def _run_stdio(args: argparse.Namespace) -> int:
-    storage = FileTokenStorage(args.state_dir / "stordata.json")
-    provider = _build_oauth_provider(args, storage)
-    async with create_mcp_http_client(auth=provider) as http_client:
-        async with streamable_http_client(args.url, http_client=http_client) as (read, write):
-            session = _RemoteSession(args, discover={})
-            ready = asyncio.Event()
-            # The stdin pump starts first so ECA's `initialize` (answered locally) never
-            # waits for the remote session -- which may need an interactive login.
-            stdin_task = asyncio.create_task(_pump_stdin(session, write, ready))
+# --------------------------------------------------------------------------- #
+# Connection supervision
+# --------------------------------------------------------------------------- #
+
+
+class _Connection:
+    """One live transport: the HTTP client, its streams and the requests in flight."""
+
+    def __init__(self, args: argparse.Namespace, session: _RemoteSession, read, write, stack) -> None:
+        self.args = args
+        self.session = session
+        self.read = read
+        self.write = write
+        self.stack = stack
+        self.inflight: dict[object, dict] = {}
+        self.probes: dict[str, asyncio.Future] = {}
+        self.dead = asyncio.Event()
+        self.pump_task: asyncio.Task | None = None
+
+    async def send(self, payload: dict, *, track: bool = True) -> None:
+        stamped, headers = self.session.stamp(payload)
+        if track and payload.get("id") is not None:
+            self.inflight[payload["id"]] = payload
+        await _send(self.write, stamped, headers)
+
+    def start(self) -> asyncio.Task:
+        self.pump_task = asyncio.create_task(self.pump())
+        return self.pump_task
+
+    def kill(self) -> None:
+        """Close the connection from the inside (keep-alive timeout)."""
+        if self.pump_task is not None and not self.pump_task.done():
+            self.pump_task.cancel()
+
+    async def aclose(self) -> None:
+        await self.stack.aclose()
+
+    async def pump(self) -> None:
+        """Forward remote messages to ECA until the stream ends or fails."""
+        try:
+            async for item in self.read:
+                if isinstance(item, Exception):
+                    raise item
+                data = _message_to_dict(item.message)
+                request_id = data.get("id")
+                if isinstance(request_id, str) and request_id.startswith(PROBE_ID_PREFIX):
+                    future = self.probes.get(request_id)
+                    if future is not None and not future.done():
+                        if "error" in data:
+                            future.set_exception(RuntimeError(str(data["error"])))
+                        else:
+                            future.set_result(data)
+                    continue
+                if request_id is not None:
+                    self.inflight.pop(request_id, None)
+                _write_message(data)
+        finally:
+            self.dead.set()
+
+
+class _Bridge:
+    """Keeps ECA connected across remote outages."""
+
+    def __init__(self, args: argparse.Namespace, storage: FileTokenStorage) -> None:
+        self.args = args
+        self.storage = storage
+        self.session = _RemoteSession(args, discover={})
+        self.connection: _Connection | None = None
+        self.first_session = asyncio.Event()
+        self.replay: list[dict] = []
+        self.last_tools: list[str] | None = None
+        self.last_activity = time.monotonic()
+        self.stop = asyncio.Event()
+        self.stdin_done = asyncio.Event()
+
+    # -- stdio side -------------------------------------------------------- #
+
+    def note_activity(self) -> None:
+        self.last_activity = time.monotonic()
+
+    async def _wait_first_session(self) -> None:
+        LOG.info("holding initialize until the remote session details are known")
+        try:
+            await asyncio.wait_for(self.first_session.wait(), self.args.auth_timeout + 60.0)
+        except asyncio.TimeoutError:
+            LOG.warning("remote session details still unknown; answering initialize with what we have")
+
+    def _queue_or_fail(self, payload: dict) -> None:
+        """A request that cannot be sent right now (no connection)."""
+        method = payload.get("method")
+        if method in REPLAYABLE_METHODS and len(self.replay) < self.args.replay_max:
+            LOG.info("queuing %s (id=%s) until the connection is back", method, payload.get("id"))
+            self.replay.append(payload)
+            return
+        LOG.warning("failing %s (id=%s): no remote connection", method, payload.get("id"))
+        _write_message(_error_frame(payload.get("id"), "bridge: no remote connection, retry the request"))
+
+    async def _read_stdin(self) -> None:
+        while True:
+            line = await asyncio.to_thread(sys.stdin.buffer.readline)
+            if not line:
+                LOG.info("stdin closed, stopping")
+                self.stdin_done.set()
+                self.stop.set()
+                if self.connection is not None:
+                    self.connection.kill()  # release the supervisor's wait on the pump
+                return
+            text = line.strip()
+            if not text:
+                continue
             try:
-                session.discover = await _discover(write, read, session, await _discover_timeout(args, storage))
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                LOG.error("ignoring unparsable stdin message: %s", exc)
+                continue
+            if not isinstance(payload, dict):
+                LOG.error("ignoring non-object stdin message: %.60s", text)
+                continue
+            try:
+                handled, response = await _local_response(payload, self.session, self._wait_first_session)
+                if handled:
+                    if response is not None:
+                        _write_message(response)
+                    continue
+                connection = self.connection
+                if connection is None or connection.dead.is_set():
+                    self._queue_or_fail(payload)
+                    continue
+                await connection.send(payload)
+                self.note_activity()
+            except Exception as exc:  # keep the session alive on a bad message
+                LOG.error("could not forward %s: %s", payload.get("method"), _describe(exc))
+                _write_message(_error_frame(payload.get("id"), f"bridge: {_describe(exc)}"))
+
+    # -- keep-alive -------------------------------------------------------- #
+
+    async def _keepalive(self) -> None:
+        if self.args.idle_probe <= 0:
+            LOG.info("keep-alive probing disabled")
+            return
+        counter = itertools.count(1)
+        while not self.stop.is_set():
+            await asyncio.sleep(min(self.args.idle_probe, 5.0))
+            connection = self.connection
+            if connection is None or connection.dead.is_set():
+                continue
+            idle = time.monotonic() - self.last_activity
+            if idle < self.args.idle_probe:
+                continue
+            probe_id = f"{PROBE_ID_PREFIX}{next(counter)}"
+            future: asyncio.Future = asyncio.get_running_loop().create_future()
+            connection.probes[probe_id] = future
+            try:
+                LOG.debug("keep-alive probe after %.0fs of inactivity", idle)
+                await connection.send(
+                    {"jsonrpc": "2.0", "id": probe_id, "method": "server/discover", "params": {}}, track=False
+                )
+                await asyncio.wait_for(future, self.args.probe_timeout)
+                LOG.debug("keep-alive probe answered")
+            except Exception as exc:
+                LOG.warning("keep-alive probe failed (%s); forcing a reconnect", _describe(exc))
+                connection.kill()
             finally:
-                ready.set()
-            LOG.info(
-                "connected to %s %s (%s)",
-                session.server_info.get("name"),
-                session.server_info.get("version"),
-                ", ".join(session.discover.get("supportedVersions") or []),
+                connection.probes.pop(probe_id, None)
+
+    # -- remote side ------------------------------------------------------- #
+
+    async def _connect(self) -> _Connection:
+        stack = contextlib.AsyncExitStack()
+        try:
+            provider = _build_oauth_provider(self.args, self.storage)
+            client = await stack.enter_async_context(create_mcp_http_client(auth=provider))
+            read, write = await stack.enter_async_context(streamable_http_client(self.args.url, http_client=client))
+        except BaseException:
+            await stack.aclose()
+            raise
+
+        connection = _Connection(self.args, self.session, read, write, stack)
+        timeout = await _discover_timeout(self.args, self.storage)
+        self.session.discover = await _request_once(
+            write, read, self.session, "server/discover", {}, DISCOVER_REQUEST_ID, timeout
+        )
+        self.first_session.set()
+        self.note_activity()
+        LOG.info(
+            "connected to %s %s (%s)",
+            self.session.server_info.get("name"),
+            self.session.server_info.get("version"),
+            ", ".join(self.session.discover.get("supportedVersions") or []),
+        )
+        self.connection = connection
+        await self._after_connect(connection)
+        return connection
+
+    async def _after_connect(self, connection: _Connection) -> None:
+        """Detect a changed tool set, then replay what could not be sent."""
+        try:
+            result = await _request_once(
+                connection.write, connection.read, self.session, "tools/list", {}, TOOLS_REQUEST_ID,
+                self.args.probe_timeout,
             )
-            remote_task = asyncio.create_task(_pump_remote(read))
-            done, pending = await asyncio.wait({stdin_task, remote_task}, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
+            names = sorted(str(tool.get("name")) for tool in (result.get("tools") or []) if tool.get("name"))
+        except Exception as exc:
+            LOG.warning("could not list the remote tools: %s", _describe(exc))
+            names = None
+        if names is not None:
+            if self.last_tools is not None and names != self.last_tools:
+                LOG.info("remote tools changed: %s -> %s", self.last_tools, names)
+                _write_message({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            self.last_tools = names
+        pending, self.replay = self.replay, []
+        for payload in pending:
+            LOG.info("replaying %s (id=%s) after reconnect", payload.get("method"), payload.get("id"))
+            try:
+                await connection.send(payload)
+            except Exception as exc:
+                LOG.error("replay of %s failed: %s", payload.get("method"), _describe(exc))
+                _write_message(_error_frame(payload.get("id"), f"bridge: replay failed: {_describe(exc)}"))
+
+    def _fail_or_replay(self, connection: _Connection) -> None:
+        """Apply the in-flight policy to the requests the drop left unanswered."""
+        for request_id, payload in list(connection.inflight.items()):
+            connection.inflight.pop(request_id, None)
+            method = payload.get("method")
+            if method in REPLAYABLE_METHODS and len(self.replay) < self.args.replay_max:
+                LOG.info("will replay %s (id=%s) after the reconnect", method, request_id)
+                self.replay.append(payload)
+            else:
+                LOG.warning("failing %s (id=%s): remote connection lost", method, request_id)
+                _write_message(
+                    _error_frame(request_id, "bridge: remote connection lost, retry the request")
+                )
+
+    async def _supervise(self) -> None:
+        delay = self.args.reconnect_delay
+        failures = 0
+        while not self.stop.is_set():
+            connection: _Connection | None = None
+            try:
+                connection = await self._connect()
+                delay = self.args.reconnect_delay
+                failures = 0
+                try:
+                    await connection.start()
+                except asyncio.CancelledError:
+                    if self.stop.is_set():
+                        break  # shutdown requested: leave the loop cleanly
+                    LOG.warning("connection closed by the bridge (keep-alive timeout)")
+                except Exception as exc:
+                    LOG.warning("connection lost: %s", _describe(exc))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                LOG.error("connect failed (attempt %d): %s", failures, _describe(exc))
+            finally:
+                if connection is not None:
+                    if connection is self.connection:
+                        self.connection = None
+                    self._fail_or_replay(connection)
+                    with contextlib.suppress(Exception):
+                        await connection.aclose()
+            if self.stop.is_set():
+                break
+            if self.args.max_reconnects and failures >= self.args.max_reconnects:
+                LOG.error("giving up after %d failed attempt(s) (--max-reconnects)", failures)
+                break
+            LOG.info("reconnecting in %.1fs", delay)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.stop.wait(), timeout=delay)
+            delay = _next_delay(delay, self.args.reconnect_max_delay)
+
+    async def run(self) -> int:
+        stdin_task = asyncio.create_task(self._read_stdin())
+        keepalive_task = asyncio.create_task(self._keepalive())
+        try:
+            await self._supervise()
+        finally:
+            for task in (stdin_task, keepalive_task):
                 task.cancel()
-            for task in done:
-                exc = task.exception()
-                if exc:
-                    raise exc
-    return 0
+            await asyncio.gather(stdin_task, keepalive_task, return_exceptions=True)
+            connection = self.connection
+            if connection is not None:
+                self.connection = None
+                with contextlib.suppress(Exception):
+                    await connection.aclose()
+        return 0
+
+
+# --------------------------------------------------------------------------- #
+# One-off login helper
+# --------------------------------------------------------------------------- #
 
 
 async def _login_only(args: argparse.Namespace) -> int:
@@ -603,20 +859,14 @@ async def _login_only(args: argparse.Namespace) -> int:
     async with create_mcp_http_client(auth=provider) as http_client:
         async with streamable_http_client(args.url, http_client=http_client) as (read, write):
             session = _RemoteSession(args, discover={})
-            session.discover = await _discover(write, read, session, await _discover_timeout(args, storage))
-            payload, headers = session.stamp({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-            await _send(write, payload, headers)
-            tools: list[str] = []
-            while True:
-                item = await read.receive()
-                if isinstance(item, Exception):
-                    raise item
-                data = _message_to_dict(item.message)
-                if data.get("id") == 1:
-                    if "error" in data:
-                        raise RuntimeError(f"tools/list failed: {data['error']}")
-                    tools = [tool["name"] for tool in ((data.get("result") or {}).get("tools") or [])]
-                    break
+            timeout = await _discover_timeout(args, storage)
+            session.discover = await _request_once(
+                write, read, session, "server/discover", {}, DISCOVER_REQUEST_ID, timeout
+            )
+            result = await _request_once(
+                write, read, session, "tools/list", {}, TOOLS_REQUEST_ID, args.probe_timeout
+            )
+            tools = [tool["name"] for tool in (result.get("tools") or [])]
     print(
         json.dumps({"url": args.url, "serverInfo": session.server_info, "tools": tools}, indent=2),
         file=sys.stderr,
@@ -659,6 +909,34 @@ def main() -> int:
         default=DEFAULT_DISCOVER_TIMEOUT,
         help="seconds to wait for server/discover when a token is already cached",
     )
+    parser.add_argument(
+        "--idle-probe",
+        type=float,
+        default=DEFAULT_IDLE_PROBE,
+        help="send a keep-alive server/discover after this many idle seconds (0 disables)",
+    )
+    parser.add_argument("--probe-timeout", type=float, default=DEFAULT_PROBE_TIMEOUT, help="keep-alive probe timeout")
+    parser.add_argument(
+        "--reconnect-delay", type=float, default=DEFAULT_RECONNECT_DELAY, help="first reconnect delay in seconds"
+    )
+    parser.add_argument(
+        "--reconnect-max-delay",
+        type=float,
+        default=DEFAULT_RECONNECT_MAX_DELAY,
+        help="cap of the exponential reconnect backoff",
+    )
+    parser.add_argument(
+        "--max-reconnects",
+        type=int,
+        default=0,
+        help="give up after this many consecutive failed connects (0 = retry forever)",
+    )
+    parser.add_argument(
+        "--replay-max",
+        type=int,
+        default=DEFAULT_REPLAY_MAX,
+        help="how many read-only requests may wait for a reconnect",
+    )
     parser.add_argument("--no-browser", action="store_true", help="only print the authorization URL")
     parser.add_argument("--login-only", action="store_true", help="sign in, list tools, exit")
     parser.add_argument("--verbose", action="store_true", help="debug logs on stderr")
@@ -674,7 +952,10 @@ def main() -> int:
     )
 
     try:
-        return asyncio.run(_login_only(args) if args.login_only else _run_stdio(args))
+        if args.login_only:
+            return asyncio.run(_login_only(args))
+        storage = FileTokenStorage(args.state_dir / "stordata.json")
+        return asyncio.run(_Bridge(args, storage).run())
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
