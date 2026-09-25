@@ -149,6 +149,9 @@
         "MY_GIT_DIR": "/root/git",
         "DEBUG": "true"
       }
+    },
+    "stordata": {
+      "url": "https://services.stordata.fr/mcp"
     }
   },
   "toolCall": {
