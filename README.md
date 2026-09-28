@@ -15,6 +15,14 @@ rules/             Path-scoped agent rules (loaded per file-path glob)
   bats.md          Rule applied when reading/writing **.bats files
   language.md      Global project rule: always respond in English
   AI_dev.md        Global project rule: phased AI development workflow
+  code_review.md   Global project rule: reviews go through the code_reviewer sub-agent
+  delegation.md    Global project rule: how-to questions go to the howto_master agent
+  readfirst.md     Global project rule: read the readfirst/ documents before answering
+readfirst/         Facts about the environment (see rules/readfirst.md)
+  projects.md      The git projects, and what each one is
+  fleet.md         Hosts, VMs, LXCs, containers, services, ports and links (diagram below)
+  metrics_and_logs.md  How metrics and logs are centralized, and how to search or read them
+  img/             Rendered diagrams linked by the documents (fleet.png)
 skills/            Agent skills (loaded by name when the task matches)
   bats/            BATS test-suite management skill (SKILL.md)
 eca/               ECA configuration assets
