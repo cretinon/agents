@@ -2,6 +2,9 @@
   "defaultModel": "deepseek/deepseek-v4-flash",
   "rules": [
     {
+      "path": "~/git/agents/rules/no_root_search.md.md"
+    },
+    {
       "path": "~/git/agents/rules/shell.md"
     },
     {
