@@ -113,7 +113,12 @@ curl -s -X POST 'http://192.168.2.125:9428/select/logsql/query' \
 **Where to look**: Grafana `http://192.168.2.30:3000`, whose dashboards are provisioned from
 `git/ansible` — `/d/fleet-hosts` (the guests), `/d/docker-containers` (the containers),
 `/d/proxmox-ve` (the hypervisor), `/d/synology-nas` (the NAS), `/d/Pi-hole-Exporter` (DNS)
-and the two OPNsense ones. For a one-off question, use vmui: `http://192.168.2.125:8428/vmui/`.
+and the two OPNsense ones. `/d/fleet-hosts` also draws `opnsense-lan`: it merges the
+`opnsense_*` series that have a counterpart there (cpu, memory, filesystem, load, network
+throughput, uptime) with the guests' `system.*` ones, under the same `host.name`, and its
+`host` variable lists the firewall with them. Its `Disk throughput` and `Processes running`
+panels have no `opnsense_*` counterpart and stay guests-only. For a one-off question, use
+vmui: `http://192.168.2.125:8428/vmui/`.
 
 Dotted names must be quoted when a client escapes dots — this fleet stores the dotted form,
 so write `{"system.cpu.utilization"}`, not `system_cpu_utilization`.
@@ -136,6 +141,10 @@ One-liners, grouped by question:
 - Hypervisor CPU: `proxmox_node_cpustat_cpu_percent`
 - NAS volume headroom: `{"synology.volume.free_bytes"}`
 - NAS disk health: `{"synology.disk.temperature"}` and `{"synology.disk.status"}`
+- Firewall performance, the same questions as the guests: CPU
+  `1 - avg(rate(opnsense_cpu_seconds_total{mode="idle"}[5m]))`, memory
+  `opnsense_system_memory_used_bytes / opnsense_system_memory_total_bytes`, root filesystem
+  `{"opnsense_system_disk_usage_ratio", "mountpoint"="/"}`
 
 Reading the answers:
 
