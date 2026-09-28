@@ -61,12 +61,14 @@ All 12 findings of the first `code_reviewer` pass (secret scan clean) are fixed:
   id to resume from. The SDK's own `Last-Event-ID` reconnection stays available for the day a
   stream appears (it is transport-internal); see §2.
 
-Verified by an offline self-test (32 checks) plus an end-to-end test that runs the real bridge
+Verified by an offline self-test plus an end-to-end test that runs the real bridge
 against a local mock MCP server, kills it mid-session and restarts it with a changed tool set
 (asserting the error frame, the queued-listing replay, the reconnect and the change
 notification), and by live runs against StorM (`--login-only`, a full stdio session, and ECA
-reporting the server `running` with its 4 tools). Harnesses live outside the repository:
-`/tmp/ECA/bridge_selftest.py`, `/tmp/ECA/mock_mcp_server.py`, `/tmp/ECA/reconnect_test.py`.
+reporting the server `running` with its 4 tools). The token-handling regression tests are
+committed (`eca/bridges/test_stordata_bridge.py`, offline, 29 checks); the other harnesses live
+outside the repository: `/tmp/ECA/bridge_selftest.py`, `/tmp/ECA/mock_mcp_server.py`,
+`/tmp/ECA/reconnect_test.py`.
 
 ## 2. Missing capabilities (bridge)
 
@@ -78,19 +80,21 @@ reporting the server `running` with its 4 tools). Harnesses live outside the rep
   progress.
 - **CLI / packaging**: the bridge is StorM-specific (URL, scope and CIMD URL are defaults), has
   no console entry point (`pyproject.toml`), no `--status` (token expiry), no `--logout` (delete
-  the token store), and no unit tests inside the repository — verification today is
+  the token store), and only token-handling regression tests inside the repository
+  (`eca/bridges/test_stordata_bridge.py`) — the rest of the verification today is
   `--login-only`, the manual stdio snippet in `README.md` and the harnesses above.
 - **Multi-server**: only `stordata` is bridged; making the script generic (any CIMD-protected
   remote MCP server) would let it cover future remote servers too.
 
 ## 3. Operational
 
-- **Re-authentication is interactive and alarming**: the access token lives ~24 h and refreshes
-  automatically, but any refresh failure (or revoked grant) makes the bridge open a browser and
-  present the **self-signed certificate warning** — now also on a *reconnect*, at any time. Until
-  a human completes it, ECA has no `stordata` tools (the server row may still show `running`,
-  since the bridge process survives). A clearer ECA-side error or a headless/service path is
-  missing.
+- **Re-authentication is interactive and alarming**: an expired **access token** (~24 h) is
+  handled silently (the store dates the tokens it receives, the bridge hands the SDK a token it
+  can refresh, and it pre-discovers the advertised token endpoint, so no browser is needed), but
+  an expired or revoked **refresh token** still makes the bridge open a browser and present the
+  **self-signed certificate warning** — at any time, including on a *reconnect*. Until a human
+  completes it, ECA has no `stordata` tools (the server row may still show `running`, since the
+  bridge process survives). A clearer ECA-side error or a headless/service path is missing.
 - **CDN staleness**: every edit of `eca/client.json` requires commit + push **and** a manual
   jsDelivr purge (the authorization server fetches the document live, so a stale copy makes the
   redirect matching fail). Automation (hook or script) is missing.

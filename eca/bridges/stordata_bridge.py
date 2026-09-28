@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import ipaddress
 import itertools
@@ -56,9 +57,14 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
+
+if TYPE_CHECKING:  # pragma: no cover - httpx2 is a runtime dependency of the SDK itself
+    import httpx2
 
 from mcp import types
 from mcp.client.auth import OAuthClientProvider
@@ -67,7 +73,9 @@ from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
     OAuthClientMetadata,
+    OAuthMetadata,
     OAuthToken,
+    ProtectedResourceMetadata,
 )
 from mcp.shared.inbound import (
     CLIENT_CAPABILITIES_META_KEY,
@@ -79,9 +87,26 @@ from mcp.shared.inbound import (
 from mcp.shared.message import ClientMessageMetadata, SessionMessage
 
 try:  # the MCP-tuned httpx2 client factory (timeouts suited to long-lived streams)
-    from mcp.shared._httpx_utils import create_mcp_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client, request_within_origin
 except ImportError:  # pragma: no cover - re-exported by the transport module
     from mcp.client.streamable_http import create_mcp_http_client
+
+    request_within_origin = None  # older SDK: the OAuth metadata priming is skipped
+
+try:  # the SDK's own OAuth discovery helpers, reused to prime the metadata (see below)
+    from mcp.client.auth.utils import (
+        build_oauth_authorization_server_metadata_discovery_urls,
+        build_protected_resource_metadata_discovery_urls,
+        create_oauth_metadata_request,
+        handle_auth_metadata_response,
+        handle_protected_resource_response,
+    )
+except ImportError:  # pragma: no cover - an SDK reorganisation: the priming is disabled
+    build_oauth_authorization_server_metadata_discovery_urls = None
+    build_protected_resource_metadata_discovery_urls = None
+    create_oauth_metadata_request = None
+    handle_auth_metadata_response = None
+    handle_protected_resource_response = None
 
 LOG = logging.getLogger("stordata-bridge")
 
@@ -106,6 +131,13 @@ DEFAULT_RECONNECT_DELAY = 1.0
 DEFAULT_RECONNECT_MAX_DELAY = 60.0
 DEFAULT_REPLAY_MAX = 64
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "eca" / "mcp-bridge"
+# The store records when the tokens were received: `expires_in` is relative and the SDK
+# persists no expiry of its own, so an absolute date is the only way to notice an expired
+# access token after a restart. See FileTokenStorage.get_tokens.
+TOKENS_SAVED_AT_KEY = "tokens_saved_at"
+# Refresh a little before the real expiry, so a token that dies mid-request does not cost
+# a 401 (which the SDK would repair with an interactive login instead of a refresh).
+ACCESS_TOKEN_EXPIRY_MARGIN = 60.0
 DISCOVER_REQUEST_ID = "stordata-bridge/discover"
 TOOLS_REQUEST_ID = "stordata-bridge/tools"
 PROBE_ID_PREFIX = "stordata-bridge/probe-"
@@ -162,6 +194,40 @@ def _next_delay(delay: float, maximum: float) -> float:
     return grown
 
 
+def _jwt_expiry(token: str) -> float | None:
+    """Read the `exp` claim of a JWT, without verifying it.
+
+    Only used to date a token already held in the state file (one written by an older
+    version has no `tokens_saved_at`); the signature is checked by the server, never here.
+    """
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (IndexError, ValueError, TypeError):
+        return None
+    expiry = claims.get("exp") if isinstance(claims, dict) else None
+    return float(expiry) if isinstance(expiry, (int, float)) and not isinstance(expiry, bool) else None
+
+
+def _access_token_expired(tokens: OAuthToken, saved_at: object) -> bool:
+    """Is the stored access token past its expiry?
+
+    Every expiry record we have counts, and the earliest wins: the absolute date the store
+    wrote when it received the tokens (`saved_at + expires_in`) and the `exp` claim of the
+    token itself, so a stale or missing `saved_at` cannot mask an expired token. With no
+    usable record at all the token is trusted, which is the pre-existing behaviour.
+    """
+    deadlines: list[float] = []
+    if isinstance(saved_at, (int, float)) and isinstance(tokens.expires_in, int):
+        deadlines.append(saved_at + tokens.expires_in)
+    if tokens.access_token:
+        expiry = _jwt_expiry(tokens.access_token)
+        if expiry is not None:
+            deadlines.append(expiry)
+    return bool(deadlines) and min(deadlines) - ACCESS_TOKEN_EXPIRY_MARGIN <= time.time()
+
+
 # --------------------------------------------------------------------------- #
 # Token storage (the SDK's TokenStorage protocol)
 # --------------------------------------------------------------------------- #
@@ -193,13 +259,36 @@ class FileTokenStorage:
         tmp.replace(self.path)
 
     async def get_tokens(self) -> OAuthToken | None:
-        raw = self._read().get("tokens")
-        return OAuthToken.model_validate(raw) if raw else None
+        """Stored tokens, without an access token once that one has expired.
+
+        The SDK's `TokenStorage` contract carries no expiry: it computes one from
+        `expires_in` when a token is *received*, so a token loaded from disk always looks
+        valid (`is_token_valid()` is true when no expiry is known). After a restart with an
+        expired access token the request then answers 401, which the SDK repairs with the
+        full *interactive* authorization instead of the refresh token it holds. Returning
+        the tokens without `access_token` keeps `can_refresh_token()` true while making
+        `is_token_valid()` false, so the SDK sends `grant_type=refresh_token` -- silently,
+        with no browser and no ECA restart.
+
+        The empty string is deliberate: `access_token` is a required `str`, and the SDK only
+        ever reads it for its truthiness (`is_token_valid`, `_add_auth_header`), so an empty
+        token is falsy like a missing one while keeping the object valid.
+        """
+        data = self._read()
+        raw = data.get("tokens")
+        if not raw:
+            return None
+        tokens = OAuthToken.model_validate(raw)
+        if tokens.access_token and _access_token_expired(tokens, data.get(TOKENS_SAVED_AT_KEY)):
+            LOG.info("the stored access token has expired; a refresh will be requested")
+            return tokens.model_copy(update={"access_token": ""})
+        return tokens
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         async with self._lock:
             data = self._read()
             data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            data[TOKENS_SAVED_AT_KEY] = time.time()
             self._write(data)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -383,8 +472,109 @@ def _build_callback_handler(args: argparse.Namespace):
     return callback_handler
 
 
-def _build_oauth_provider(args: argparse.Namespace, storage: FileTokenStorage) -> OAuthClientProvider:
-    return OAuthClientProvider(
+async def _discovery_get(client: httpx2.AsyncClient, url: str) -> httpx2.Response:
+    """GET a discovery URL, following same-origin redirects.
+
+    The RFC 8414 well-known URL of this server answers a 302 towards the OIDC document, and
+    the SDK's own client does not follow redirects -- `request_within_origin` does.
+    """
+    request = create_oauth_metadata_request(url)
+    return await request_within_origin(client, request.method, str(request.url), headers=dict(request.headers))
+
+
+@dataclass
+class _OAuthMetadataCache:
+    """Discovery documents, kept across reconnects (they are static for a given server)."""
+
+    oauth_metadata: OAuthMetadata | None = None
+    protected_resource_metadata: ProtectedResourceMetadata | None = None
+    auth_server_url: str | None = None
+
+
+def _apply_oauth_metadata(provider: OAuthClientProvider, cache: _OAuthMetadataCache) -> None:
+    """Copy a discovered metadata set into the provider the SDK will use."""
+    if cache.protected_resource_metadata is not None:
+        provider.context.protected_resource_metadata = cache.protected_resource_metadata
+    if cache.auth_server_url is not None:
+        provider.context.auth_server_url = cache.auth_server_url
+    if cache.oauth_metadata is not None:
+        provider.context.oauth_metadata = cache.oauth_metadata
+
+
+async def _discover_oauth_metadata(args: argparse.Namespace) -> _OAuthMetadataCache:
+    """Walk the SDK's discovery URLs: the protected resource, then the authorization server.
+
+    Bounded by `--discover-timeout` for the whole walk (the client timeout does not cover the
+    sum of the candidates), and offline failures are reported by the caller as a warning.
+    """
+    async with asyncio.timeout(args.discover_timeout):
+        async with create_mcp_http_client(timeout=args.discover_timeout) as client:
+            cache = _OAuthMetadataCache()
+            for url in build_protected_resource_metadata_discovery_urls(None, args.url):
+                prm = await handle_protected_resource_response(await _discovery_get(client, url))
+                if prm is None:
+                    continue
+                cache.protected_resource_metadata = prm
+                if prm.authorization_servers:
+                    cache.auth_server_url = str(prm.authorization_servers[0])
+                break
+            for url in build_oauth_authorization_server_metadata_discovery_urls(cache.auth_server_url, args.url):
+                ok, metadata = await handle_auth_metadata_response(await _discovery_get(client, url))
+                if not ok:  # a server error: the next candidate cannot do better
+                    break
+                if metadata is not None:
+                    cache.oauth_metadata = metadata
+                    return cache
+            raise RuntimeError("no authorization-server metadata found")
+
+
+async def _prime_oauth_metadata(
+    args: argparse.Namespace,
+    provider: OAuthClientProvider,
+    cache: _OAuthMetadataCache | None = None,
+) -> _OAuthMetadataCache | None:
+    """Hand the SDK the authorization-server metadata before it needs it.
+
+    The SDK only discovers that metadata while handling a 401, but it tries the token
+    *refresh* before sending a request -- and without metadata the refresh is posted to
+    `<origin>/token` (the RFC 8414 fallback) instead of the advertised endpoint, which this
+    authorization server answers 404. The SDK then discards the stored tokens and falls back
+    to an interactive login, which a headless ECA can never complete. Priming the provider
+    makes both the pre-request refresh and a mid-session one target the advertised endpoint.
+
+    A `cache` skips the discovery entirely (a reconnect reuses it), and a missing or failing
+    discovery is only ever a warning: without the metadata the bridge behaves exactly as it
+    did before priming.
+    """
+    if request_within_origin is None or build_oauth_authorization_server_metadata_discovery_urls is None:
+        LOG.warning(  # pragma: no cover - only on an SDK that renames its internals
+            "this mcp SDK version has no OAuth discovery helpers to prime the metadata with: an "
+            "expired access token will fall back to an interactive login (pin the tested version)"
+        )
+        return cache
+    if cache is not None:
+        _apply_oauth_metadata(provider, cache)
+        return cache
+    try:
+        cache = await _discover_oauth_metadata(args)
+    except Exception as exc:
+        LOG.warning(
+            "could not pre-discover the OAuth metadata (%s); a token refresh may target the wrong endpoint",
+            _describe(exc),
+        )
+        return None
+    _apply_oauth_metadata(provider, cache)
+    LOG.debug("OAuth metadata primed (token endpoint: %s)", getattr(cache.oauth_metadata, "token_endpoint", None))
+    return cache
+
+
+async def _prepare_oauth_provider(
+    args: argparse.Namespace,
+    storage: FileTokenStorage,
+    cache: _OAuthMetadataCache | None = None,
+) -> tuple[OAuthClientProvider, _OAuthMetadataCache | None]:
+    """Build the SDK's OAuth provider, primed with the discovered metadata (see above)."""
+    provider = OAuthClientProvider(
         server_url=args.url,
         client_metadata=OAuthClientMetadata(
             redirect_uris=[_redirect_uri(args)],
@@ -398,6 +588,7 @@ def _build_oauth_provider(args: argparse.Namespace, storage: FileTokenStorage) -
         callback_handler=_build_callback_handler(args),
         client_metadata_url=args.client_metadata_url,
     )
+    return provider, await _prime_oauth_metadata(args, provider, cache)
 
 
 # --------------------------------------------------------------------------- #
@@ -627,6 +818,7 @@ class _Bridge:
         self.session = _RemoteSession(args, discover={})
         self.connection: _Connection | None = None
         self.first_session = asyncio.Event()
+        self.oauth_metadata: _OAuthMetadataCache | None = None
         self.replay: list[dict] = []
         self.last_tools: list[str] | None = None
         self.last_activity = time.monotonic()
@@ -728,7 +920,9 @@ class _Bridge:
     async def _connect(self) -> _Connection:
         stack = contextlib.AsyncExitStack()
         try:
-            provider = _build_oauth_provider(self.args, self.storage)
+            provider, self.oauth_metadata = await _prepare_oauth_provider(
+                self.args, self.storage, self.oauth_metadata
+            )
             client = await stack.enter_async_context(create_mcp_http_client(auth=provider))
             read, write = await stack.enter_async_context(streamable_http_client(self.args.url, http_client=client))
         except BaseException:
@@ -855,7 +1049,7 @@ class _Bridge:
 async def _login_only(args: argparse.Namespace) -> int:
     """Sign in once, discover the server, list its tools, then exit."""
     storage = FileTokenStorage(args.state_dir / "stordata.json")
-    provider = _build_oauth_provider(args, storage)
+    provider, _ = await _prepare_oauth_provider(args, storage)
     async with create_mcp_http_client(auth=provider) as http_client:
         async with streamable_http_client(args.url, http_client=http_client) as (read, write):
             session = _RemoteSession(args, discover={})

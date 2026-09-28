@@ -95,9 +95,11 @@ bound to the loopback interface only.
 ### Start everything (first time)
 
 ```shell
-# 1. the bridge's private virtualenv (kept outside the repo)
+# 1. the bridge's private virtualenv (kept outside the repo) — pin the version the bridge was
+#    written against: it reuses the SDK's OAuth discovery helpers, which are internal and move
+#    between releases, so an unpinned upgrade silently disables the silent token refresh
 python3 -m venv /root/.local/share/eca/mcp-bridge-venv
-/root/.local/share/eca/mcp-bridge-venv/bin/pip install mcp
+/root/.local/share/eca/mcp-bridge-venv/bin/pip install 'mcp==2.2.0'
 
 # 2. publish the CIMD document — it is PUBLIC: commit, push, then refresh the CDN cache
 #    (after ANY edit of eca/client.json; the authorization server fetches it live)
@@ -132,6 +134,21 @@ stdio side (ECA keeps stdin open, so hold it open here too):
   | /root/.local/share/eca/mcp-bridge-venv/bin/python "$MY_GIT_DIR/agents/eca/bridges/stordata_bridge.py"
 ```
 
+### Testing the bridge
+
+The token-handling regression tests are committed and run **offline** (no network, no credentials;
+the live token store is only read):
+
+```shell
+/root/.local/share/eca/mcp-bridge-venv/bin/python \
+  "$MY_GIT_DIR/agents/eca/bridges/test_stordata_bridge.py"
+# -> 29 passed, 0 failed  (exit 0)
+```
+
+They cover the access-token expiry detection, the store handing the SDK a refreshable token, and
+the OAuth metadata priming with its cache. A real session is still validated with `--login-only`
+and the stdio snippet above.
+
 ### Supervision: reconnect, keep-alive and in-flight requests
 
 The bridge keeps ECA connected across remote outages — the stdio session and its tools survive
@@ -147,15 +164,17 @@ a dropped connection, a restarted server or a network blip:
 
 Retrying is unbounded by default (`--max-reconnects N` bounds it). Because the wire is
 stateless — no session id, no event stream — there is nothing to *resume*: `Last-Event-ID`
-resumption is plumbed for future streams but is a no-op against this server. When the token has
-expired or been revoked, a reconnect triggers the interactive login again (same browser and
-self-signed-certificate warning as the first run).
+resumption is plumbed for future streams but is a no-op against this server. When the **access
+token** (~24 h) has expired, the bridge refreshes it silently with the stored refresh token — no
+browser, no ECA restart (the store records when the tokens were received, which is what makes the
+expiry detectable after a restart). Only an expired or revoked **refresh token** triggers the
+interactive login again (same browser and self-signed-certificate warning as the first run).
 
 ### State (never in this repository)
 
 | Path | Content | Mode |
 |---|---|---|
-| `/root/.local/state/eca/mcp-bridge/stordata.json` | OAuth tokens + client info | `0600` |
+| `/root/.local/state/eca/mcp-bridge/stordata.json` | OAuth tokens, their receive time + client info | `0600` |
 | `/root/.local/state/eca/mcp-bridge/callback-key.pem` | self-signed callback private key | `0600` |
 | `/root/.local/state/eca/mcp-bridge/callback-cert.pem` | matching certificate | `0644` |
 
@@ -169,8 +188,9 @@ self-signed-certificate warning as the first run).
 | browser: `redirect_uri … does not match` | `eca/client.json` was edited without commit+push (+CDN purge), or it no longer lists `https://localhost:19284/auth/callback` |
 | `Missing required header "mcp-protocol-version"` / `"mcp-method"` | a wrong `--protocol-version` is being stamped; keep the default `2026-07-28` |
 | browser certificate warning after consent | expected: the callback is served with a self-signed localhost certificate (Advanced → Proceed) |
-| ECA shows the server `failed` with 0 tools | run `--login-only` to (re)authenticate, then restart the server in ECA |
-| browser sign-in prompt appears again | the token expired or was revoked and the bridge reconnected: complete the login (or run `--login-only` beforehand) |
+| ECA exposes no `stordata` tool (server `failed` or 0 tools) | the bridge has no usable token: read its stderr. `AUTHENTICATION REQUIRED` → the refresh token is expired or revoked (run `--login-only`, then restart the server in ECA); `could not pre-discover the OAuth metadata` → the authorization server's discovery is unreachable or slow and the bridge is waiting on it |
+| browser sign-in prompt appears again | the **refresh** token expired or was revoked: complete the login (or run `--login-only` beforehand). An expired *access* token alone never prompts, provided a refresh token and the client info are stored next to it |
+| bridge stderr: `this mcp SDK version has no OAuth discovery helpers` | the installed `mcp` version is not the pinned one: the silent refresh is disabled and an expired access token will prompt for a browser login — reinstall the pinned version (see “Start everything”) |
 | ECA keeps the server `running` during an outage | expected: the bridge stays up and replays; check its stderr for `connection lost` / `reconnecting in` |
 | no keep-alive traffic wanted | start the bridge with `--idle-probe 0` |
 | bridge stopped with `giving up after N failed attempt(s)` | `--max-reconnects` is set; raise it or remove the flag to retry forever |
