@@ -80,7 +80,7 @@ Managed by OpenTofu (`git/tofu`): Debian 13 cloud image + cloud-init snippets, o
 
 ## 3. LXCs in pve (`tofu_cts`)
 
-Unprivileged Debian 13 containers, one per role, ids 121–124 (configured in `git/tofu`).
+Unprivileged Debian 13 containers, one per role, ids 121–124 and 126 (configured in `git/tofu`).
 
 | LXC | Address | CPU / RAM / disk | Tag |
 |-----|---------|------------------|-----|
@@ -88,6 +88,7 @@ Unprivileged Debian 13 containers, one per role, ids 121–124 (configured in `g
 | `pihole` | `192.168.2.53` | 2 / 512 MiB / 4 GB | `pihole_server` |
 | `otel-receiv` | `192.168.2.202` | 1 / 1 GiB / 8 GB | `otel_receiv` |
 | `grafana` | `192.168.2.30` | 2 / 1 GiB / 8 GB | `grafana_server` |
+| `cron` | `192.168.2.44` | 2 / 512 MiB / 8 GB | `cron_server` |
 
 - **`apt-cacher-ng`** — apt proxy of the lab, `:3142`.
   - Every Debian 12/13 guest fetches its indexes and `.deb` through it (http, `HTTPS///` rewriting).
@@ -105,6 +106,11 @@ Unprivileged Debian 13 containers, one per role, ids 121–124 (configured in `g
 - **`grafana`** — dashboards of the fleet, `:3000`.
   - Prometheus datasource = VictoriaMetrics `192.168.2.125:8428`.
   - Dashboards provisioned from `git/ansible`: fleet, containers, synology, opnsense, Pi-hole, proxmox-ve.
+- **`cron`** — the scheduler of the lab: the one guest whose jobs reach every other one.
+  - Runs `git`, `openssh-client` and `cron` itself; no job is deployed here, the guest is only prepared for them.
+  - Holds root's RSA key pair, created once by `git/ansible` (`playbook/catalog/centralized_cron.yaml`).
+  - Its public key is authorized for `root` on every guest of `tofu_vms` and `tofu_cts`: a job connects to each of them without a password.
+  - Serves nothing on the LAN: its own key is how the fleet reaches it, and only its jobs use it.
 
 ---
 
@@ -186,6 +192,7 @@ rectangle "victoria .125\nVictoriaLogs 9428\nVictoriaMetrics 8428" as VIC
 rectangle "grafana .30 :3000" as GRAF
 rectangle "synology .36" as SYN
 rectangle "docker-new .126\nregistry 5000 + containers" as DK
+rectangle "cron .44\nscheduler" as CRON
 
 INET -- OPN
 OPN -- PIH
@@ -201,6 +208,13 @@ OTEL <--> VIC : logs OTLP / scrape 1234 1235
 OTEL <--> SYN : syslog 54526/udp / SNMP 161
 GRAF --> VIC : datasource :8428
 DK --> PIH : containers DNS :53
+CRON --> NTP : ssh :22 to every guest
+CRON --> VIC
+CRON --> DK
+CRON --> APT
+CRON --> PIH
+CRON --> OTEL
+CRON --> GRAF
 @enduml
 ```
 
@@ -238,4 +252,5 @@ The links of the fleet, one line each (the table covers more than the diagram):
 | container → `pihole` | `53` | DNS of the containers |
 | VPN-bound container → `openvpn-client` | `172.94.0.94` | default gateway: the internet egress of these containers |
 | `transmission`, `sabnzbd`, `sonarr` → `synology` | NFS | `192.168.2.36:/volume1/Download`, mounted with autofs |
+| `cron` → every guest | `22` SSH | the centralized jobs of the lab: the key of the `cron` guest is authorized for `root` on every guest of `tofu_vms` and `tofu_cts` |
 | LAN client → services | `3000`, `9428`, `8428`, ports of §4 | dashboards and service UIs; databases have no auth nor TLS |
