@@ -63,15 +63,25 @@ both documents together. Grafana needs its own login, the two databases are open
 
 **Logs**:
 
+- Every record names the service it comes from: `service.name`, beside `host.name` (the
+  guest, or the container) and `service.instance.id`. Both are **stream fields** — what
+  the log UI lists and what a query filters and groups on.
 - The journal of every guest, `pve` included, with `host.name` = the inventory name
-  (`victoria`, `pihole`, `pve`, ...) and `level` derived from the journal priority;
+  (`victoria`, `pihole`, `pve`, ...), `service.name` = the syslog tag of the line
+  (`sshd-session`, `CRON`, `sudo`, `otelcol-contrib`, ..., or its `_COMM` for the handful of
+  lines the journal gives no tag to) and `level` derived from the journal priority;
   `service.instance.id` and `host.id` tag the record too.
 - The stdout/stderr of the containers of `docker-new` (read from Docker's own log files, one
-  receiver per container): `host.name` is the **container** name (`sonarr`, `sabnzbd`, ...)
-  and `service.instance.id` is the guest `docker-new`.
+  receiver per container): `host.name` is the **container** name (`sonarr`, `sabnzbd`, ...),
+  `service.name` holds that same name — Docker's log carries no syslog tag — and
+  `service.instance.id` is the guest `docker-new`.
 - The firewall logs of `opnsense-lan` (filterlog, sshd, DHCP, HAProxy, Suricata), enriched
-  from its API; only that address may push to the syslog port.
-- The DSM logs of `synology`, pushed in RFC 5424.
+  from its API; only that address may push to the syslog port. `service.name` is the
+  APP-NAME of the syslog line (`configd.py`, `audit`, `ntpd`, `/usr/sbin/cron`, ...), or
+  the `opnsense.subsystem` of the lines that carry none (the `filterlog` ones); the
+  exporter itself is named by `service.version` and `opnsense.source`.
+- The DSM logs of `synology`, pushed in RFC 5424: `service.name` is the `appname` of the
+  message (`System`).
 - The journal of `otel-receiv` itself, so a failing collector is visible in the database.
 - Not there: no traces at all — the only debug output kept is the one written into the
   journal of `otel-receiv`. Everything else arrives, the journal of `pve` among it.
@@ -101,8 +111,9 @@ curl -s -X POST 'http://192.168.2.125:9428/select/logsql/query' \
   --data-urlencode 'query=host.name:"grafana" level:error' --data-urlencode 'limit=20'
 ```
 
-- Fields to filter on: `host.name` (a guest or a container), `level`, `_time`, and the
-  message body; `i("...")` is the case-insensitive phrase filter the tool builds.
+- Fields to filter on: `host.name` (a guest or a container), `service.name` (the syslog tag,
+  the APP-NAME of a parsed syslog line, or the `appname` of a DSM message), `level`, `_time`,
+  and the message body; `i("...")` is the case-insensitive phrase filter the tool builds.
 - `_time:7d` bounds a window, and `start`/`end` (RFC 3339 UTC) bound it exactly — that is
   what the tool sends.
 - Interactive UI: `http://192.168.2.125:9428/select/vmui/` — log explorer, live tail, charts.
