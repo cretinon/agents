@@ -89,11 +89,18 @@ both documents together. Grafana needs its own login, the two databases are open
 ## 3. Searching the logs
 
 **The tool to use in ECA: `search_logs`** (from the `mcp-bash` MCP server). It queries
-VictoriaLogs and answers the matching lines as `time | host | level | message`, newest
-first, followed by the source line of the query.
+VictoriaLogs and answers the matching lines as `time | host | service | level | message`,
+newest first, followed by the source line of the query — the service column being the
+`service.name` of the record, or `-` when the source gives it none.
 
 - `query` (required) — the string to look for, matched case-insensitively.
 - `host` (optional) — one or more guests, comma-separated; by default the whole fleet.
+- `service` (optional) — one or more services, comma-separated, matched on the `service.name`
+  of the records: the journal tag of a guest (`sshd-session`, `CRON`, `sudo`), the name of a
+  container (`sonarr`), the application name of a DSM message (`System`), the APP-NAME of a
+  firewall line (`configd.py`).
+- `level` (optional) — one or more severities, comma-separated, among `fatal`, `error`,
+  `warn`, `info` and `debug`; any other value is refused.
 - `timeframe` (optional) — `30m`, `12h`, `1day`/`24h`, `7days`, `2weeks`; default `1day`.
 - `limit` (optional) — maximum number of lines, default 100, clamped 1..1000.
 
@@ -103,6 +110,8 @@ Ask it things like:
 - `query=No space left on device` — the whole fleet, in the default window.
 - `query=error, host=sonarr, timeframe=12h, limit=200` — a container that misbehaves.
 - `query=segfault` — any crash, anywhere, in the last day.
+- `query=failed, service=sshd-session, level=error, timeframe=12h` — the rejected logins of
+  every guest, without the noise of the other services.
 
 **By hand (LogsQL)** — for what the tool does not cover, POST a LogsQL query:
 
