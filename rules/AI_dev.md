@@ -42,11 +42,18 @@ Construct the step-by-step implementation plan
 > 1. [Step 1]
 > 2. [Step 2]
 > **Testing Strategy:** [How YOUR tests and lint will be validated (scoped, never the full suite); full-suite and coverage are run by the `code_reviewer` sub-agent during the review]
+> **Open points**:
+> - open point 1: [explain the point]
+>     - option 1
+>     - option 2
+> - open point 2: [explain the point]
+>     - option 1
+>     - option 2
 >
 > ---
 > *Please reply to validate this plan or request adjustments before proceeding.*
 
-3. **Pause:** Stop execution immediately and wait for user input. **Do NOT run implementation steps until approved.**
+3. **Pause:** Stop execution immediately and wait for user input. **Do NOT take decision yourself**, you have to ask questions until there is no more open points. **Do NOT run implementation steps until approved.**
 
 ---
 
