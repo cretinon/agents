@@ -66,6 +66,20 @@ both documents together. Grafana needs its own login, the two databases are open
 - Every record names the service it comes from: `service.name`, beside `host.name` (the
   guest, or the container) and `service.instance.id`. Both are **stream fields** — what
   the log UI lists and what a query filters and groups on.
+- `level` is the severity the fleet derives per source, and this is the field the UI
+  colours, what the log alert rules filter on (`level:error`) and what the `level`
+  argument of `search_logs` matches: the journal priority of a guest, the severity the
+  firewall's exporter names (the OpenTelemetry scale, `INFO`/`ERROR`) or the one the
+  `syslog` receiver in front of the NAS names (the syslog scale: `info`, `notice`,
+  `warning`, `err`, `crit`, … — `notice` reads as `info`, `err` as `error`), or the level
+  an application writes into its own container line (`[Info]`, `level=debug`, `] dbg`, a
+  level word after a timestamp). VictoriaLogs maps no `severity_text` onto `level` of its
+  own, and the container reader knows only the shapes above: a line carrying none of them
+  keeps none — the shell errors a container's entrypoint prints (`cat: /sabnzbd/.vpn: No
+  such file or directory`), the operational lines of `squid`, and the levels `sabnzbd` and
+  `nzbhydra2` write in formats of their own (a `…::INFO::[…]` between two colons, an
+  ANSI-wrapped ` INFO `) among them. Unlike `service.name` it is a
+  simple field, not a stream: a record does not change stream with its severity.
 - The journal of every guest, `pve` included, with `host.name` = the inventory name
   (`victoria`, `pihole`, `pve`, ...), `service.name` = the syslog tag of the line
   (`sshd-session`, `CRON`, `sudo`, `otelcol-contrib`, ..., or its `_COMM` for the handful of
@@ -121,8 +135,9 @@ curl -s -X POST 'http://192.168.2.125:9428/select/logsql/query' \
 ```
 
 - Fields to filter on: `host.name` (a guest or a container), `service.name` (the syslog tag,
-  the APP-NAME of a parsed syslog line, or the `appname` of a DSM message), `level`, `_time`,
-  and the message body; `i("...")` is the case-insensitive phrase filter the tool builds.
+  the APP-NAME of a parsed syslog line, or the `appname` of a DSM message), `level` (the
+  severity the fleet derives for that source), `_time`, and the message body; `i("...")` is
+  the case-insensitive phrase filter the tool builds.
 - `_time:7d` bounds a window, and `start`/`end` (RFC 3339 UTC) bound it exactly — that is
   what the tool sends.
 - Interactive UI: `http://192.168.2.125:9428/select/vmui/` — log explorer, live tail, charts.
