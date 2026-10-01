@@ -19,6 +19,7 @@ Give the `code_reviewer` a self-contained task prompt containing:
 - the exact **scope**: files changed and/or the embedded diff (`git diff HEAD` output) when reviewing pending changes;
 - the **review focus** (bugs, conventions, test parity, security, ...) if the user specified one;
 - the instruction to **run the full project quality gate** (`${MY_GIT_DIR}/shell/my_warp.sh --lib <LIB> -s|-b|-k`) and report the three results — the reviewer is the only agent that runs ALL tests, so the gate is part of the review before commit / PR / task completion.
+- There is a forbidden rule for the reviewer : he is NOT ALLOWED to run tasks in background
 
 The reviewer's system prompt already instructs it to also read `${MY_GIT_DIR}/agents/rules/shell.md` (shell coding conventions) when the reviewed code is Shell, in addition to the project's `AGENTS.md`.
 
