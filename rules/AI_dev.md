@@ -43,10 +43,10 @@ Construct the step-by-step implementation plan
 > 2. [Step 2]
 > **Testing Strategy:** [How YOUR tests and lint will be validated (scoped, never the full suite); full-suite and coverage are run by the `code_reviewer` sub-agent during the review]
 > **Open points**:
-> - open point 1: [explain the point]
+> 1. [open point 1 : explain the point]
 >     - option 1
 >     - option 2
-> - open point 2: [explain the point]
+> 2. [open point 2: explain the point]
 >     - option 1
 >     - option 2
 >
@@ -60,7 +60,7 @@ Construct the step-by-step implementation plan
 ## Phase 3: Plan Revision (Interactive Loop)
 - If the user requests changes to the plan, update the proposal accordingly.
 - Present the updated plan and request validation again.
-- Proceed to **Phase 4** ONLY when the user explicitly approves the plan (e.g., "approved", "ok", "go ahead").
+- Proceed to **Phase 4** ONLY when the user explicitly approves the plan (e.g., "approved", "ok", "go ahead") **AND** when there is no more open points. Do **NOT take decision yourself**, you have to ask questions.
 
 ---
 
