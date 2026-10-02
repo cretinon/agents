@@ -33,6 +33,9 @@
     },
     {
       "path": "~/git/agents/rules/readfirst.md"
+    },
+    {
+      "path": "~/git/agents/rules/serena.md"
     }
   ],
   "agent": {
@@ -190,6 +193,14 @@
     "stordata": {
       "command": "/root/.local/share/eca/mcp-bridge-venv/bin/python",
       "args": ["/root/git/agents/eca/bridges/stordata_bridge.py"]
+    },
+    "serena": {
+      "command": "/root/.local/bin/serena",
+      "args": ["start-mcp-server", "--context", "ide"]
+    },
+    "graphify": {
+      "command": "/root/.local/bin/graphify-mcp",
+      "args": []
     }
   },
   "toolCall": {
@@ -197,6 +208,8 @@
       "allow": {
         "mcp-bash": {},
         "storm-mcp": {},
+        "serena": {},
+        "graphify": {},
         "eca__git": {},
         "eca__shell_command": {
           "argsMatchers": {
