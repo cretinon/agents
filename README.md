@@ -30,6 +30,8 @@ eca/               ECA configuration assets
   client.json      PUBLIC OAuth (CIMD) client metadata document, served by jsDelivr
   bridges/         stdio <-> HTTP bridges ECA starts as local MCP servers
     stordata_bridge.py   Bridges ECA to https://services.stordata.fr/mcp (OAuth/CIMD)
+  hooks/           Shell hooks ECA runs around tool calls (declared in eca/config.json)
+    graphify-refresh.sh  preToolCall hook: rebuilds the graphify graph before a graphify call
 ```
 
 ## How ECA loads these
@@ -47,7 +49,10 @@ references these paths:
   ],
   "skills": [
     { "path": "~/git/agents/skills/bats" }
-  ]
+  ],
+  "hooks": {
+    "graphify-fresh": { "type": "preToolCall", "matcher": { "graphify": {} } }
+  }
 }
 ```
 
@@ -58,6 +63,27 @@ references these paths:
 - **Rules without a `paths` glob** (e.g. `language.md`, `AI_dev.md`) load as
   project/workspace rules and apply to the whole session regardless of the file
   being touched.
+
+### graphify refresh hook
+
+`eca/hooks/graphify-refresh.sh` is declared in the config as a `preToolCall` hook matching the
+whole `graphify` MCP server, so the graph is refreshed before any `graphify__*` call executes.
+
+- **Target**: the project named by the call's `project_path` (a direct child of `/root/git`), falling back to the current workspace when the call names none.
+- **Scope**: only projects under `/root/git` are refreshed. `/root/.cache` and `/tmp` are ECA workspaces too and are ignored on purpose.
+- **Rebuild**: a code-only `graphify extract` runs into `/root/.cache/graphify/<project>` when the graph is missing or older than a file of the project, so nothing is ever written inside a repository.
+- **Failure**: a stale graph that cannot be refreshed denies the call, and the agent is told to report it instead of trusting the graph. A project with no graph yet only gets a notice, so graphify stays usable.
+- **Restart**: ECA reads `hooks` at startup, so editing `eca/config.json` needs an ECA restart; the script itself is executed from disk on every call.
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `GRAPHIFY_BIN` | `graphify` | binary used for the extraction |
+| `GRAPHIFY_ROOT` | `/root/git` | only projects below it are refreshed |
+| `GRAPH_OUTPUT_ROOT` | `/root/.cache/graphify` | where the graphs live |
+| `REBUILD_TIMEOUT` | `120` | seconds allowed for one extraction, keep it below the action timeout |
+
+Keep `REBUILD_TIMEOUT` below the 180 s action `timeout` set in the config: a hook killed by that
+ceiling exits non-zero, so ECA discards its JSON and the call proceeds without the deny.
 
 ## Conventions
 
@@ -72,9 +98,10 @@ references these paths:
   the tests they wrote via a filter regex, while the `code_reviewer` sub-agent runs the
   full `-s|-b|-k` gate — never raw `bats`). When the project rules change, update these
   files in the same commit.
-- **Testing**: these are markdown assets, not code — the `shell`/`mcp` quality gate
-  (`-s`/`-b`/`-k`) does not apply. Validate by re-reading the file and checking ECA loads
-  it (`eca-info` skill) after changes.
+- **Testing**: these are markdown assets plus one hook script, not a library — the
+  `shell`/`mcp` quality gate (`-s`/`-b`/`-k`) does not apply here. Validate by re-reading
+  the file, checking `eca/hooks/*.sh` with `bash -n` and `shellcheck`, and confirming ECA
+  loads the config (`eca-info` skill) after changes.
 
 ## StorM (`stordata`) MCP bridge
 

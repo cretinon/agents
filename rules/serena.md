@@ -32,6 +32,10 @@ Serena (symbols) and graphify (knowledge graph) answer those without reading who
   (`source` indirection, `eval`, dispatch by string).
 - Rebuild it after a refactor:
   `graphify extract /root/git/<project> --code-only --out /root/.cache/graphify/<project>`.
+- The graph is refreshed automatically before every graphify call by the ECA `preToolCall` hook
+  `eca/hooks/graphify-refresh.sh` (projects under `/root/git` only, the target being the call's
+  `project_path`), so a manual rebuild is only needed outside that root; when a stale graph cannot
+  be refreshed the call is denied and must be reported instead of trusting the graph.
 
 ## Hard rules
 - Never run `serena project health-check` for a normal task: it writes its log into

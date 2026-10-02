@@ -203,6 +203,23 @@
       "args": []
     }
   },
+  "hooks": {
+    "graphify-fresh": {
+      "type": "preToolCall",
+      "matcher": {
+        "graphify": {}
+      },
+      "visible": false,
+      "description": "Rebuild the graphify code graph before any call to the graphify MCP server",
+      "actions": [
+        {
+          "type": "shell",
+          "file": "/root/git/agents/eca/hooks/graphify-refresh.sh",
+          "timeout": 180000
+        }
+      ]
+    }
+  },
   "toolCall": {
     "approval": {
       "allow": {
