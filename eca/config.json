@@ -52,7 +52,7 @@
         "git",
         "bg_job",
         "mcp-bash__commit_all",
-        "mcp-bash__commit_show",
+        "mcp-bash__commit_status",
         "mcp-bash__commit_message"
       ],
       "toolCall": {
@@ -108,7 +108,7 @@
         "mcp-bash__RTFM",
         "mcp-bash__deepseek_balance",
         "mcp-bash__commit_all",
-        "mcp-bash__commit_show",
+        "mcp-bash__commit_status",
         "mcp-bash__commit_message",
         "mcp-bash__web_search_browser"
       ],
@@ -126,7 +126,7 @@
         "spawn_agent",
         "git",
         "mcp-bash__commit_all",
-        "mcp-bash__commit_show",
+        "mcp-bash__commit_status",
         "mcp-bash__commit_message"
       ]
     },
@@ -137,7 +137,7 @@
       "description": "General-purpose agent for complex multi-step research and execution tasks; works in parallel units and returns compact results. NOT for 'how to' questions - those go to howto_master; NOT for simple codebase lookups - use explorer.",
       "disabledTools": [
         "mcp-bash__commit_all",
-        "mcp-bash__commit_show",
+        "mcp-bash__commit_status",
         "mcp-bash__commit_message"
       ]
     }
